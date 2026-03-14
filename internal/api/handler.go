@@ -45,6 +45,14 @@ func extractMemoryID(path string) (string, error) {
 	return id, nil
 }
 
+// GET /api/health
+func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"version": "1.0.0", // TODO: Use build version from ldflags
+	})
+}
+
 // POST /api/memories
 func (h *Handler) CreateMemory(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)

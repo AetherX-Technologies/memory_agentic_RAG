@@ -9,6 +9,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
 	switch {
+	case path == "/api/health":
+		h.HealthCheck(w, r)
 	case path == "/api/memories" && r.Method == http.MethodPost:
 		h.CreateMemory(w, r)
 	case path == "/api/memories/search":

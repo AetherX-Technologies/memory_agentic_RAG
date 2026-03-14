@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	jinaAPIKey      = "jina_20dd039936c649f2989d66c7d5be53d9M9DPc25QT6pJHs51PUw6v0pZCZGf"
+	jinaAPIKey string
 	jinaEmbedURL    = "https://api.jina.ai/v1/embeddings"
 	jinaRerankURL   = "https://api.jina.ai/v1/rerank"
 	dimension       = 1024

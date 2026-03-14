@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	jinaAPIKey = "jina_20dd039936c649f2989d66c7d5be53d9M9DPc25QT6pJHs51PUw6v0pZCZGf"
+	jinaAPIKey string
 	jinaURL    = "https://api.jina.ai/v1/embeddings"
 	jinaModel  = "jina-embeddings-v3"
 	dimension  = 1024
@@ -63,6 +63,12 @@ func getEmbedding(text string, task string) ([]float32, error) {
 }
 
 func main() {
+	jinaAPIKey = os.Getenv("JINA_API_KEY")
+	if jinaAPIKey == "" {
+		fmt.Fprintln(os.Stderr, "Error: JINA_API_KEY environment variable not set")
+		os.Exit(1)
+	}
+
 	fmt.Println("Real-world Comparison Test with Jina API")
 	fmt.Println("=========================================\n")
 

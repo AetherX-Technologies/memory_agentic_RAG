@@ -1,0 +1,6 @@
+=== RUN   TestStore
+--- PASS: TestStore (0.01s)
+=== RUN   TestVectorSearch
+--- PASS: TestVectorSearch (0.00s)
+PASS
+ok  	github.com/yourusername/hybridmem-rag/internal/store	0.611s

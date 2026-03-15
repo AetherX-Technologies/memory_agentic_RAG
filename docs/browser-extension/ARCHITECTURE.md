@@ -59,9 +59,16 @@ observer.observe(targetNode, {
 - 处理离线缓存和重试
 
 **错误处理策略**：
-- **429 (Rate Limit)**: 指数退避重试（1min → 2min → 5min），最多3次
+
+当前服务端实现（201/400/500）：
+- **400 (Bad Request)**: 记录错误日志，跳过该条消息
+- **500 (Internal Server Error)**: 触发连接失败重试（1s/2s/5s）
+- **网络错误**: 缓存到 IndexedDB，服务恢复后重试
+
+未来服务端增强（插件应预留支持）：
+- **408 (Timeout)**: 视为临时故障，触发重试
+- **429 (Rate Limit)**: 指数退避重试（60s/120s/300s），最多3次
 - **503 (Service Unavailable)**: 立即缓存到 IndexedDB，30秒后重试
-- **400/500**: 记录错误日志，跳过该条消息
 
 ### 3. Popup UI
 - 搜索界面

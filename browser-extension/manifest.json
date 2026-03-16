@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "HybridMem-RAG",
+  "version": "1.0.0",
+  "description": "自动捕捉 AI 对话并存储到本地知识库",
+  "permissions": ["storage", "notifications", "alarms"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["src/content/chatgpt.js"]
+    },
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["src/content/claude.js"]
+    },
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": ["src/content/gemini.js"]
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_icon": "public/icon.svg"
+  },
+  "icons": {
+    "128": "public/icon.svg"
+  }
+}

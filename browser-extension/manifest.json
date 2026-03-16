@@ -17,15 +17,15 @@
   "content_scripts": [
     {
       "matches": ["https://chatgpt.com/*"],
-      "js": ["src/content/chatgpt.js"]
+      "js": ["src/content/base-adapter.js", "src/content/chatgpt.js"]
     },
     {
       "matches": ["https://claude.ai/*"],
-      "js": ["src/content/claude.js"]
+      "js": ["src/content/base-adapter.js", "src/content/claude.js"]
     },
     {
       "matches": ["https://gemini.google.com/*"],
-      "js": ["src/content/gemini.js"]
+      "js": ["src/content/base-adapter.js", "src/content/gemini.js"]
     }
   ],
   "action": {

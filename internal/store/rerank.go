@@ -12,7 +12,7 @@ import (
 // RerankConfig holds reranker configuration
 type RerankConfig struct {
 	Enabled           bool
-	Provider          string  // use ProviderJina, ProviderVoyage, ProviderCohere
+	Provider          string // use ProviderJina, ProviderVoyage, ProviderCohere
 	APIKey            string
 	Model             string
 	Endpoint          string
@@ -100,14 +100,22 @@ func (r *jinaReranker) Rerank(query string, results []SearchResult) ([]SearchRes
 		candidates = candidates[:r.config.MaxCandidates]
 	}
 
-	// Extract documents
-	docs := make([]string, len(candidates))
+	// Extract documents (filter empty)
+	docs := make([]string, 0, len(candidates))
+	validIndices := make([]int, 0, len(candidates))
 	for i, res := range candidates {
 		text := res.Entry.Text
 		if len(text) > r.config.MaxDocLength {
 			text = text[:r.config.MaxDocLength]
 		}
-		docs[i] = text
+		if text != "" {
+			docs = append(docs, text)
+			validIndices = append(validIndices, i)
+		}
+	}
+
+	if len(docs) == 0 {
+		return candidates, nil
 	}
 
 	// Call API
@@ -117,8 +125,8 @@ func (r *jinaReranker) Rerank(query string, results []SearchResult) ([]SearchRes
 		return candidates, err
 	}
 
-	// Blend scores
-	return r.blendScores(candidates, rerankResults), nil
+	// Blend scores with index mapping
+	return r.blendScoresWithMapping(candidates, rerankResults, validIndices), nil
 }
 
 func (r *jinaReranker) callJinaAPI(query string, docs []string) ([]RerankResult, error) {
@@ -148,23 +156,85 @@ func (r *jinaReranker) callJinaAPI(query string, docs []string) ([]RerankResult,
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jina API error: %d", resp.StatusCode)
-	}
-
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	var apiResp struct {
-		Results []RerankResult `json:"results"`
-	}
-	if err := json.Unmarshal(data, &apiResp); err != nil {
-		return nil, err
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("jina API error: %d, body: %s", resp.StatusCode, string(data))
 	}
 
-	return apiResp.Results, nil
+	var apiResp struct {
+		Results []struct {
+			Index          int     `json:"index"`
+			RelevanceScore float64 `json:"relevance_score"`
+			Document       *struct {
+				Text string `json:"text"`
+			} `json:"document,omitempty"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(data, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	results := make([]RerankResult, len(apiResp.Results))
+	for i, r := range apiResp.Results {
+		results[i] = RerankResult{
+			Index:          r.Index,
+			RelevanceScore: r.RelevanceScore,
+		}
+	}
+
+	return results, nil
+}
+
+func (r *jinaReranker) blendScoresWithMapping(candidates []SearchResult, rerankResults []RerankResult, validIndices []int) []SearchResult {
+	// Create set of valid indices
+	validSet := make(map[int]bool)
+	for _, idx := range validIndices {
+		validSet[idx] = true
+	}
+
+	// Create map of rerank scores (original index -> rerank score)
+	rerankMap := make(map[int]float64)
+	for _, rr := range rerankResults {
+		if rr.Index < len(validIndices) {
+			originalIdx := validIndices[rr.Index]
+			rerankMap[originalIdx] = rr.RelevanceScore
+		}
+	}
+
+	// Blend scores
+	blended := make([]SearchResult, len(candidates))
+	for i, cand := range candidates {
+		var finalScore float64
+
+		if !validSet[i] {
+			// Empty document, not sent to API, keep original score
+			finalScore = cand.Score
+		} else if rerankScore, found := rerankMap[i]; found {
+			// Returned by rerank API: blend scores
+			blendedScore := r.config.BlendWeight*rerankScore + (1-r.config.BlendWeight)*cand.Score
+
+			// Apply min threshold
+			minScore := cand.Score * r.config.MinBlendedScore
+			if blendedScore < minScore {
+				blendedScore = minScore
+			}
+			finalScore = blendedScore
+		} else {
+			// Sent to API but not returned: apply penalty
+			finalScore = cand.Score * r.config.UnreturnedPenalty
+		}
+
+		blended[i] = SearchResult{
+			Entry: cand.Entry,
+			Score: finalScore,
+		}
+	}
+
+	return blended
 }
 
 func (r *jinaReranker) blendScores(candidates []SearchResult, rerankResults []RerankResult) []SearchResult {

@@ -42,6 +42,10 @@ HybridMem-RAG (纯 Go 实现)
 - 何时阅读：实现 HTTP API 时
 - 内容：RESTful 接口定义、请求/响应格式
 
+**4. 分层检索设计** → `hierarchical-retrieval.md`
+- 何时阅读：实现分层混合检索时
+- 内容：OpenViking 分层思想整合、层次路径解析、跨层聚合算法
+
 ### 参考资料
 
 **改造方案** → `../references/transformation-guide.md`
@@ -55,6 +59,11 @@ HybridMem-RAG (纯 Go 实现)
 **开发参考资源** → `../references/reference-resources.md`
 - 参考源码位置
 - Go 依赖库清单
+
+**OpenViking 整合方案** → `../references/openviking-integration.md`
+- OpenViking 核心特性
+- 分层检索策略
+- 整合到 HybridMem-RAG 的方案
 
 ---
 
@@ -97,8 +106,9 @@ HybridMem-RAG (纯 Go 实现)
 3. **混合检索**（第3周）→ 阅读 `retrieval-engine.md` 第3-4节
 4. **评分管道**（第4周）→ 阅读 `retrieval-engine.md` 第5节
 5. **HTTP API**（第5周）→ 阅读 `api-design.md`
-6. **移动端**（第6周）→ 阅读 `../references/ios-compatibility.md`
+6. **分层检索**（第6周）→ 阅读 `hierarchical-retrieval.md` + `../references/openviking-integration.md`
+7. **移动端**（第7周）→ 阅读 `../references/ios-compatibility.md`
 
 ---
 
-**最后更新**：2024-03-13
+**最后更新**：2026-03-16

@@ -16,8 +16,26 @@ func (s *sqliteStore) HybridSearch(queryVector []float32, queryText string, limi
 	if limit <= 0 {
 		return nil, fmt.Errorf("limit must be positive, got %d", limit)
 	}
+
+	// 空向量时只执行 BM25 搜索
 	if len(queryVector) == 0 {
-		return nil, fmt.Errorf("query vector cannot be empty")
+		if queryText == "" {
+			return nil, fmt.Errorf("both query vector and text are empty")
+		}
+		results, err := s.BM25Search(queryText, limit, scopes)
+		if err != nil {
+			return nil, err
+		}
+		// 应用重排（如果启用）
+		if s.reranker != nil {
+			reranked, err := s.reranker.Rerank(queryText, results)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "rerank failed: %v\n", err)
+			} else {
+				results = reranked
+			}
+		}
+		return topK(results, limit), nil
 	}
 
 	var vectorResults []SearchResult

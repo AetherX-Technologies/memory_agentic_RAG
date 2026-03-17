@@ -1,0 +1,22 @@
+# 检索模式配置
+# 1: 仅关键词（BM25）
+# 2: 关键词 + 向量检索（Hybrid）
+# 3: 关键词 + 向量 + 重排（Full Pipeline）
+retrieval_mode: 3
+
+# 向量嵌入配置（模式2和3需要）
+embedding:
+  enabled: true
+  provider: "openai"
+  api_key: "YOUR_API_KEY_HERE"
+  model: "Qwen/Qwen3-Embedding-4B"
+  endpoint: "https://api.xiaocaseai.com/v1/embeddings"
+  dimension: 1024
+
+# 重排配置（模式3需要）
+rerank:
+  enabled: true
+  provider: "jina"
+  api_key: "YOUR_API_KEY_HERE"
+  model: "Qwen/Qwen3-Reranker-4B"
+  endpoint: "https://api.xiaocaseai.com/v1/rerank"

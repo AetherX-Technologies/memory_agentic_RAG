@@ -3,3 +3,4 @@
 *.db-wal
 dist/
 .DS_Store
+cmd/real_world_test/config.yaml

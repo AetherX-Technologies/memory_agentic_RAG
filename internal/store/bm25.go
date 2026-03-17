@@ -2,6 +2,8 @@ package store
 
 // BM25Search 使用 FTS5 进行全文检索
 func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]SearchResult, error) {
+	query = EscapeFTS5Query(query)
+
 	scopeFilter := ""
 	args := []interface{}{query}
 
@@ -21,7 +23,7 @@ func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]Se
 
 	queryStr := `
 		SELECT f.memory_id, f.rank, m.text, m.category, m.scope,
-			m.importance, m.timestamp, m.metadata
+			m.importance, m.timestamp, m.metadata, m.hierarchy_path, m.hierarchy_level
 		FROM fts_memories f
 		JOIN memories m ON f.memory_id = m.id
 		WHERE fts_memories MATCH ?` + scopeFilter + `
@@ -37,12 +39,14 @@ func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]Se
 	results := make([]SearchResult, 0, limit)
 	for rows.Next() {
 		var memoryID, text, category, scope, metadata string
+		var hierarchyPath *string
 		var importance float64
 		var timestamp int64
+		var hierarchyLevel int
 		var ftsRank float64
 
 		if err := rows.Scan(&memoryID, &ftsRank, &text, &category, &scope,
-			&importance, &timestamp, &metadata); err != nil {
+			&importance, &timestamp, &metadata, &hierarchyPath, &hierarchyLevel); err != nil {
 			return nil, err
 		}
 
@@ -52,16 +56,22 @@ func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]Se
 			score = 0
 		}
 
+		m := Memory{
+			ID:             memoryID,
+			Text:           text,
+			Category:       category,
+			Scope:          scope,
+			Importance:     importance,
+			Timestamp:      timestamp,
+			Metadata:       metadata,
+			HierarchyLevel: hierarchyLevel,
+		}
+		if hierarchyPath != nil {
+			m.HierarchyPath = *hierarchyPath
+		}
+
 		results = append(results, SearchResult{
-			Entry: Memory{
-				ID:         memoryID,
-				Text:       text,
-				Category:   category,
-				Scope:      scope,
-				Importance: importance,
-				Timestamp:  timestamp,
-				Metadata:   metadata,
-			},
+			Entry: m,
 			Score: score,
 		})
 	}

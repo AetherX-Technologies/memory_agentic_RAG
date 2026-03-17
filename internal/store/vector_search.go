@@ -58,8 +58,8 @@ func (s *sqliteStore) VectorSearch(query []float32, limit int, scopes []string) 
 	}
 
 	// 读取所有向量
-	queryStr := `SELECT v.memory_id, v.vector, m.text, m.category, m.scope, 
-		m.importance, m.timestamp, m.metadata
+	queryStr := `SELECT v.memory_id, v.vector, m.text, m.category, m.scope,
+		m.importance, m.timestamp, m.metadata, m.hierarchy_path, m.hierarchy_level
 		FROM vectors v JOIN memories m ON v.memory_id = m.id` + scopeFilter
 
 	args := make([]interface{}, len(scopes))
@@ -76,12 +76,14 @@ func (s *sqliteStore) VectorSearch(query []float32, limit int, scopes []string) 
 	var results []SearchResult
 	for rows.Next() {
 		var memoryID, text, category, scope, metadata string
+		var hierarchyPath *string
 		var importance float64
 		var timestamp int64
+		var hierarchyLevel int
 		var vectorData []byte
 
 		if err := rows.Scan(&memoryID, &vectorData, &text, &category, &scope,
-			&importance, &timestamp, &metadata); err != nil {
+			&importance, &timestamp, &metadata, &hierarchyPath, &hierarchyLevel); err != nil {
 			return nil, err
 		}
 
@@ -91,16 +93,21 @@ func (s *sqliteStore) VectorSearch(query []float32, limit int, scopes []string) 
 		}
 
 		score := CosineSimilarityNormalized(queryNorm, vector)
+		m := Memory{
+			ID:             memoryID,
+			Text:           text,
+			Category:       category,
+			Scope:          scope,
+			Importance:     importance,
+			Timestamp:      timestamp,
+			Metadata:       metadata,
+			HierarchyLevel: hierarchyLevel,
+		}
+		if hierarchyPath != nil {
+			m.HierarchyPath = *hierarchyPath
+		}
 		results = append(results, SearchResult{
-			Entry: Memory{
-				ID:         memoryID,
-				Text:       text,
-				Category:   category,
-				Scope:      scope,
-				Importance: importance,
-				Timestamp:  timestamp,
-				Metadata:   metadata,
-			},
+			Entry: m,
 			Score: float64(score),
 		})
 	}

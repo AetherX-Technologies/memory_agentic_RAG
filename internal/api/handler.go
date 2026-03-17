@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/yourusername/hybridmem-rag/internal/store"
@@ -73,7 +74,44 @@ func (h *Handler) CreateMemory(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/memories/search
 func (h *Handler) SearchMemories(w http.ResponseWriter, r *http.Request) {
-	results := []store.SearchResult{}
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		writeError(w, http.StatusBadRequest, "query parameter 'q' is required")
+		return
+	}
+
+	limitStr := r.URL.Query().Get("limit")
+	limit := 10
+	if limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+
+	currentPath := r.URL.Query().Get("current_path")
+	scopesParam := r.URL.Query().Get("scope")
+	var scopes []string
+	if scopesParam != "" {
+		for _, s := range strings.Split(scopesParam, ",") {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				scopes = append(scopes, trimmed)
+			}
+		}
+	}
+
+	// TODO: 需要添加 embedder 支持
+	// 临时方案：使用空向量会导致无意义的相似度，应该只使用 BM25
+	queryVec := []float32{} // 空向量表示未向量化
+
+	// Escape FTS5 special characters to prevent syntax errors
+	escapedQuery := store.EscapeFTS5Query(query)
+
+	results, err := h.store.Search(queryVec, escapedQuery, currentPath, limit, scopes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusOK, results)
 }
 

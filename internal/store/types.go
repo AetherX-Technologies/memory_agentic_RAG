@@ -2,14 +2,16 @@ package store
 
 // Memory 表示一条记忆
 type Memory struct {
-	ID         string  `json:"id"`
-	Text       string  `json:"text"`
-	Vector     []float32 `json:"-"`
-	Category   string  `json:"category"`
-	Scope      string  `json:"scope"`
-	Importance float64 `json:"importance"`
-	Timestamp  int64   `json:"timestamp"`
-	Metadata   string  `json:"metadata,omitempty"`
+	ID             string    `json:"id"`
+	Text           string    `json:"text"`
+	Vector         []float32 `json:"-"`
+	Category       string    `json:"category"`
+	Scope          string    `json:"scope"`
+	Importance     float64   `json:"importance"`
+	Timestamp      int64     `json:"timestamp"`
+	Metadata       string    `json:"metadata,omitempty"`
+	HierarchyPath  string    `json:"hierarchy_path,omitempty"`
+	HierarchyLevel int       `json:"hierarchy_level,omitempty"`
 }
 
 // SearchResult 表示检索结果

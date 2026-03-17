@@ -118,13 +118,13 @@ go test ./internal/store/...
 └────────────────────┬────────────────────────────────────┘
                      ↓
 ┌─────────────────────────────────────────────────────────┐
-│              12-Stage Scoring Pipeline                  │
-│  1. Adaptive filtering  2. Vectorization                │
-│  3. Parallel retrieval  4. RRF fusion                   │
-│  5. Cross-encoder rerank 6. Recency boost               │
-│  7. Importance weighting 8. Length normalization        │
-│  9. Access reinforcement 10. Connection graph boost     │
-│  11. Hard filtering     12. MMR diversity               │
+│              Multi-Stage Scoring Pipeline               │
+│  1. RRF fusion (Vector + BM25)                          │
+│  2. Cross-encoder reranking (optional)                  │
+│  3. Recency boost                                       │
+│  4. Importance weighting                                │
+│  5. Length normalization                                │
+│  6. Hard score filtering                                │
 └────────────────────┬────────────────────────────────────┘
                      ↓
 ┌─────────────────────────────────────────────────────────┐
@@ -299,9 +299,8 @@ MIT License - see [LICENSE](./LICENSE) for details
 ## 🙏 Acknowledgments
 
 This project integrates ideas from:
-- **Memory LanceDB Pro** - 12-stage scoring pipeline
-- **OpenViking** - Hierarchical file-system-aware retrieval
-- **Memory Agent** - Active consolidation mechanisms
+- **OpenViking** - Hierarchical file-system-aware retrieval pattern
+- **Memory LanceDB Pro** - Multi-stage scoring and reranking pipeline concepts
 
 ---
 

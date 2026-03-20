@@ -17,6 +17,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.SearchMemories(w, r)
 	case path == "/api/memories/stats":
 		h.GetStats(w, r)
+	case strings.HasSuffix(path, "/content") && strings.HasPrefix(path, "/api/memories/") && r.Method == http.MethodGet:
+		h.GetMemoryContent(w, r)
+	case strings.HasSuffix(path, "/content") && strings.HasPrefix(path, "/api/memories/"):
+		writeError(w, http.StatusMethodNotAllowed, "only GET is allowed for /content")
 	case strings.HasPrefix(path, "/api/memories/") && r.Method == http.MethodDelete:
 		h.DeleteMemory(w, r)
 	case strings.HasPrefix(path, "/api/memories/") && r.Method == http.MethodPut:

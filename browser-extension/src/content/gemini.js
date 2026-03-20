@@ -1,18 +1,17 @@
-// Gemini 适配器
+// Gemini 适配器 (gemini.google.com)
 class GeminiAdapter extends BaseAdapter {
   constructor() {
     super('gemini');
   }
 
   getSelectors() {
+    // Gemini uses message-content and model-response containers
     return {
-      user: '.query-content',
-      assistant: '.model-response-text'
+      user: '.query-content, message-content.user-query',
+      assistant: '.model-response-text, message-content.model-response'
     };
   }
 }
 
 const adapter = new GeminiAdapter();
 adapter.start();
-
-console.log('[HybridMem] Gemini adapter started');

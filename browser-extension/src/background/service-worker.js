@@ -1,19 +1,42 @@
 // API 配置
 const API_BASE = 'http://localhost:8080';
 const RETRY_DELAYS = [1000, 2000, 5000];
+const MAX_OFFLINE_QUEUE = 500;
+
+// 已处理消息 ID 去重集合
+const processedMessages = new Set();
 
 // 消息处理
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'CAPTURE_MESSAGE') {
     handleMessage(message.data);
   }
+  if (message.type === 'RETRY_QUEUE') {
+    retryOfflineQueue().then(() => sendResponse({ ok: true }));
+    return true; // async response
+  }
 });
 
 // 处理捕获的消息
 async function handleMessage(data) {
+  // 去重：基于消息指纹
+  const msgId = generateMessageId(data);
+  if (processedMessages.has(msgId)) {
+    return;
+  }
+  processedMessages.add(msgId);
+
+  // 防止去重集合无限增长（保留最近 2000 条）
+  if (processedMessages.size > 2000) {
+    const iter = processedMessages.values();
+    for (let i = 0; i < 500; i++) {
+      processedMessages.delete(iter.next().value);
+    }
+  }
+
   const memory = {
     text: data.text,
-    category: 'fact',
+    category: 'conversation',
     scope: `browser:${data.platform}`,
     importance: 0.5,
     timestamp: data.timestamp,
@@ -22,7 +45,7 @@ async function handleMessage(data) {
       url: data.url,
       role: data.role,
       platform: data.platform,
-      messageId: generateMessageId(data)
+      messageId: msgId
     })
   };
 
@@ -43,8 +66,12 @@ async function sendToAPI(memory, retryCount = 0) {
       return;
     }
 
-    if (response.status === 500 && retryCount < RETRY_DELAYS.length) {
-      setTimeout(() => sendToAPI(memory, retryCount + 1), RETRY_DELAYS[retryCount]);
+    if (response.status >= 500) {
+      if (retryCount < RETRY_DELAYS.length) {
+        setTimeout(() => sendToAPI(memory, retryCount + 1), RETRY_DELAYS[retryCount]);
+      } else {
+        await cacheOffline(memory); // all retries exhausted
+      }
       return;
     }
 
@@ -60,16 +87,30 @@ async function sendToAPI(memory, retryCount = 0) {
   }
 }
 
-// 离线缓存
+// 离线缓存（带容量限制）
 async function cacheOffline(memory) {
-  const cached = await chrome.storage.local.get('offline_queue') || { offline_queue: [] };
-  cached.offline_queue.push({ ...memory, retryCount: 0 });
-  await chrome.storage.local.set(cached);
+  const result = await chrome.storage.local.get('offline_queue');
+  const queue = result.offline_queue || [];
+
+  // 容量限制：丢弃最旧的消息
+  if (queue.length >= MAX_OFFLINE_QUEUE) {
+    queue.splice(0, queue.length - MAX_OFFLINE_QUEUE + 1);
+  }
+
+  queue.push({ ...memory, retryCount: 0, cachedAt: Date.now() });
+  await chrome.storage.local.set({ offline_queue: queue });
+  console.log(`[HybridMem] Cached offline (queue: ${queue.length})`);
 }
 
-// 生成消息 ID
+// 生成消息指纹（用于去重）
 function generateMessageId(data) {
-  return `${data.platform}-${data.timestamp}-${data.role}`;
+  // 使用平台+角色+内容前100字符的哈希
+  const content = `${data.platform}:${data.role}:${data.text.substring(0, 100)}:${data.url}`;
+  let hash = 0;
+  for (let i = 0; i < content.length; i++) {
+    hash = ((hash << 5) - hash + content.charCodeAt(i)) | 0;
+  }
+  return `msg-${hash.toString(36)}`;
 }
 
 // 健康检查
@@ -89,10 +130,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // 重试离线队列
 async function retryOfflineQueue() {
-  const cached = await chrome.storage.local.get('offline_queue');
-  if (!cached.offline_queue?.length) return;
+  const result = await chrome.storage.local.get('offline_queue');
+  const queue = result.offline_queue || [];
+  if (queue.length === 0) return;
 
-  const queue = cached.offline_queue;
   const remaining = [];
 
   for (const memory of queue) {
@@ -106,6 +147,7 @@ async function retryOfflineQueue() {
       if (!response.ok && memory.retryCount < 3) {
         remaining.push({ ...memory, retryCount: memory.retryCount + 1 });
       }
+      // retryCount >= 3: silently discard
     } catch {
       if (memory.retryCount < 3) {
         remaining.push({ ...memory, retryCount: memory.retryCount + 1 });
@@ -114,6 +156,7 @@ async function retryOfflineQueue() {
   }
 
   await chrome.storage.local.set({ offline_queue: remaining });
+  console.log(`[HybridMem] Retried queue: ${queue.length - remaining.length} sent, ${remaining.length} remaining`);
 }
 
 console.log('[HybridMem] Background service worker started');

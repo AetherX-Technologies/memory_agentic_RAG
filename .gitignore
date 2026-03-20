@@ -4,3 +4,17 @@
 dist/
 .DS_Store
 cmd/real_world_test/config.yaml
+
+# ONNX models (too large for git)
+models/
+*.onnx
+
+# Compiled binaries (root level)
+/openviking_integration
+/real_doc_test
+/real_world_test
+/integration_test
+
+# Build artifacts
+simple/build/
+simple/

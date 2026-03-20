@@ -69,7 +69,10 @@ func (s *sqliteStore) vectorSearchInLevel(queryVec []float32, level string, limi
 	scopeFilter, scopeArgs := buildScopeFilter(scopes)
 
 	sql := `
-		SELECT m.id, m.text, v.vector, m.hierarchy_path, m.category, m.scope, m.importance, m.timestamp, m.metadata
+		SELECT m.id, m.text, v.vector, m.abstract, m.overview,
+			m.category, m.scope, m.importance, m.timestamp, m.metadata,
+			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
+			m.source_file, m.chunk_index, m.token_count
 		FROM memories m
 		JOIN vectors v ON m.id = v.memory_id
 		WHERE (m.hierarchy_path = ? OR m.hierarchy_path LIKE ? ESCAPE '\')` + scopeFilter
@@ -86,10 +89,16 @@ func (s *sqliteStore) vectorSearchInLevel(queryVec []float32, level string, limi
 	for rows.Next() {
 		var m Memory
 		var vectorBlob []byte
-		if err := rows.Scan(&m.ID, &m.Text, &vectorBlob, &m.HierarchyPath, &m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata); err != nil {
+		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
+		var tokenCount *int
+		if err := rows.Scan(&m.ID, &m.Text, &vectorBlob, &abstract, &overview,
+			&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
+			&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
+			&sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to scan row in vectorSearchInLevel: %v\n", err)
 			continue
 		}
+		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 
 		vec, err := DeserializeVector(vectorBlob)
 		if err != nil {
@@ -99,6 +108,9 @@ func (s *sqliteStore) vectorSearchInLevel(queryVec []float32, level string, limi
 		m.Vector = vec
 		score := float64(CosineSimilarity(queryVec, m.Vector))
 		candidates = append(candidates, SearchResult{Entry: m, Score: score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
@@ -119,7 +131,11 @@ func (s *sqliteStore) bm25SearchInLevel(query string, level string, limit int, s
 	scopeFilter, scopeArgs := buildScopeFilter(scopes)
 
 	sql := `
-		SELECT m.id, m.text, m.hierarchy_path, m.category, m.scope, m.importance, m.timestamp, m.metadata, rank as score
+		SELECT m.id, m.text, m.abstract, m.overview,
+			m.category, m.scope, m.importance, m.timestamp, m.metadata,
+			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
+			m.source_file, m.chunk_index, m.token_count,
+			rank as score
 		FROM fts_memories
 		JOIN memories m ON fts_memories.memory_id = m.id
 		WHERE fts_memories MATCH ?
@@ -140,11 +156,21 @@ func (s *sqliteStore) bm25SearchInLevel(query string, level string, limit int, s
 	for rows.Next() {
 		var m Memory
 		var score float64
-		if err := rows.Scan(&m.ID, &m.Text, &m.HierarchyPath, &m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata, &score); err != nil {
+		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
+		var tokenCount *int
+		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
+			&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
+			&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
+			&sourceFile, &m.ChunkIndex, &tokenCount,
+			&score); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to scan row in bm25SearchInLevel: %v\n", err)
 			continue
 		}
+		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 		results = append(results, SearchResult{Entry: m, Score: score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return results, nil
@@ -280,7 +306,10 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 	// 如果有向量，执行向量搜索
 	if len(queryVec) > 0 {
 		sql := `
-			SELECT m.id, m.text, v.vector, m.hierarchy_path, m.category, m.scope, m.importance, m.timestamp, m.metadata
+			SELECT m.id, m.text, v.vector, m.abstract, m.overview,
+				m.category, m.scope, m.importance, m.timestamp, m.metadata,
+				m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
+				m.source_file, m.chunk_index, m.token_count
 			FROM memories m
 			JOIN vectors v ON m.id = v.memory_id
 			WHERE 1=1` + scopeFilter
@@ -299,15 +328,17 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 		var candidates []SearchResult
 		for rows.Next() {
 			var m Memory
-			var hierarchyPath *string
 			var vectorBlob []byte
-			if err := rows.Scan(&m.ID, &m.Text, &vectorBlob, &hierarchyPath, &m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata); err != nil {
+			var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
+			var tokenCount *int
+			if err := rows.Scan(&m.ID, &m.Text, &vectorBlob, &abstract, &overview,
+				&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
+				&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
+				&sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to scan row in searchGlobalMemories: %v\n", err)
 				continue
 			}
-			if hierarchyPath != nil {
-				m.HierarchyPath = *hierarchyPath
-			}
+			assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 			vec, err := DeserializeVector(vectorBlob)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to deserialize vector for memory %s: %v\n", m.ID, err)
@@ -316,6 +347,9 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 			m.Vector = vec
 			score := float64(CosineSimilarity(queryVec, m.Vector))
 			candidates = append(candidates, SearchResult{Entry: m, Score: score})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
 		}
 
 		sort.Slice(candidates, func(i, j int) bool {
@@ -332,7 +366,11 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 	query = EscapeFTS5Query(query)
 
 	sql := `
-		SELECT m.id, m.text, m.hierarchy_path, m.category, m.scope, m.importance, m.timestamp, m.metadata, rank as score
+		SELECT m.id, m.text, m.abstract, m.overview,
+			m.category, m.scope, m.importance, m.timestamp, m.metadata,
+			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
+			m.source_file, m.chunk_index, m.token_count,
+			rank as score
 		FROM fts_memories
 		JOIN memories m ON fts_memories.memory_id = m.id
 		WHERE fts_memories MATCH ?` + scopeFilter + `
@@ -354,17 +392,23 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 	var results []SearchResult
 	for rows.Next() {
 		var m Memory
-		var hierarchyPath *string
 		var score float64
-		if err := rows.Scan(&m.ID, &m.Text, &hierarchyPath, &m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata, &score); err != nil {
+		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
+		var tokenCount *int
+		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
+			&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
+			&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
+			&sourceFile, &m.ChunkIndex, &tokenCount,
+			&score); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to scan row in searchGlobalMemories BM25: %v\n", err)
 			continue
 		}
-		if hierarchyPath != nil {
-			m.HierarchyPath = *hierarchyPath
-		}
+		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 		// BM25 score is negative (smaller-is-better), convert to positive
 		results = append(results, SearchResult{Entry: m, Score: -score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return results, nil

@@ -109,3 +109,52 @@ func migrateHierarchy(db *sql.DB) error {
 	`, colHierarchyPath, tableMemories, colHierarchyPath, colHierarchyLevel, tableMemories, colHierarchyLevel))
 	return err
 }
+
+// openVikingColumns lists the columns added for OpenViking L0/L1/L2 support.
+var openVikingColumns = []struct {
+	Name    string
+	DDL     string
+}{
+	{"abstract", "TEXT DEFAULT NULL"},
+	{"overview", "TEXT DEFAULT NULL"},
+	{"parent_id", "TEXT DEFAULT NULL"},
+	{"node_type", "TEXT DEFAULT 'chunk'"},
+	{"source_file", "TEXT DEFAULT NULL"},
+	{"chunk_index", "INTEGER DEFAULT 0"},
+	{"token_count", "INTEGER DEFAULT NULL"},
+}
+
+// migrateOpenViking adds L0/L1/L2 and tree-structure columns for OpenViking integration (idempotent).
+func migrateOpenViking(db *sql.DB) error {
+	for _, col := range openVikingColumns {
+		var count int
+		err := db.QueryRow(
+			fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?`, tableMemories),
+			col.Name,
+		).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("failed to check column %s: %w", col.Name, err)
+		}
+		if count == 0 {
+			_, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, tableMemories, col.Name, col.DDL))
+			if err != nil {
+				return fmt.Errorf("failed to add column %s: %w", col.Name, err)
+			}
+		}
+	}
+
+	// Create indexes (IF NOT EXISTS is idempotent)
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_parent_id ON memories(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_node_type ON memories(node_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_source_file ON memories(source_file)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunk_index ON memories(source_file, chunk_index)`,
+	}
+	for _, idx := range indexes {
+		if _, err := db.Exec(idx); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	return nil
+}

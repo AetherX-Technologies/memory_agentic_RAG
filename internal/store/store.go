@@ -39,13 +39,25 @@ func init() {
 					}
 				}
 
-				// 如果可执行文件目录找不到，尝试当前工作目录
+				// 如果可执行文件目录找不到，向上搜索 lib/ 目录（支持 go test 子目录运行）
 				if extPath == "" {
 					cwd, err := os.Getwd()
 					if err == nil {
-						candidate := filepath.Join(cwd, "lib", extName)
-						if _, err := os.Stat(candidate); err == nil {
-							extPath = candidate
+						dir := cwd
+						for i := 0; i < 10; i++ {
+							candidate := filepath.Join(dir, "lib", extName)
+							if _, err := os.Stat(candidate); err == nil {
+								extPath = candidate
+								break
+							}
+							if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+								break
+							}
+							parent := filepath.Dir(dir)
+							if parent == dir {
+								break
+							}
+							dir = parent
 						}
 					}
 				}
@@ -76,6 +88,9 @@ type Store interface {
 	VectorSearch(query []float32, limit int, scopes []string) ([]SearchResult, error)
 	HybridSearch(queryVector []float32, queryText string, limit int, scopes []string) ([]SearchResult, error)
 	HierarchicalHybridSearch(queryVector []float32, queryText string, currentPath string, limit int, scopes []string) ([]SearchResult, error)
+	GetChildren(parentID string) ([]*Memory, error)
+	HasChildren(id string) (bool, error)
+	GetContent(id string) (string, error)
 	Close() error
 }
 
@@ -134,16 +149,36 @@ func New(config Config) (Store, error) {
 }
 
 func initSchema(db *sql.DB) error {
-	schemas := []string{schemaMemories, schemaVectors, schemaFTS, schemaTriggers}
-	for _, schema := range schemas {
+	// Base tables (always required)
+	for _, schema := range []string{schemaMemories, schemaVectors} {
 		if _, err := db.Exec(schema); err != nil {
 			return err
 		}
 	}
 
+	// FTS5 with tokenizer fallback: try 'simple' (Chinese), fall back to 'unicode61' (built-in)
+	if _, err := db.Exec(schemaFTS); err != nil {
+		ftsUnicode := `CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
+			memory_id UNINDEXED, content, tokenize='unicode61');`
+		if _, err2 := db.Exec(ftsUnicode); err2 != nil {
+			return fmt.Errorf("FTS5 unavailable (tried 'simple' and 'unicode61'): %w", err2)
+		}
+		fmt.Fprintf(os.Stderr, "warning: FTS5 using unicode61 fallback tokenizer (Chinese segmentation degraded)\n")
+	}
+
+	// FTS triggers
+	if _, err := db.Exec(schemaTriggers); err != nil {
+		return err
+	}
+
 	// 执行层次字段迁移
 	if err := migrateHierarchy(db); err != nil {
 		return fmt.Errorf("failed to migrate hierarchy: %w", err)
+	}
+
+	// 执行 OpenViking L0/L1/L2 字段迁移
+	if err := migrateOpenViking(db); err != nil {
+		return fmt.Errorf("failed to migrate openviking: %w", err)
 	}
 
 	return nil
@@ -164,17 +199,19 @@ func (s *sqliteStore) Insert(memory *Memory) (string, error) {
 	defer tx.Rollback()
 
 	// 插入记忆
-	var hierarchyPathVal interface{}
-	if memory.HierarchyPath == "" {
-		hierarchyPathVal = nil
-	} else {
-		hierarchyPathVal = memory.HierarchyPath
-	}
 	_, err = tx.Exec(`
-		INSERT INTO memories (id, text, category, scope, importance, timestamp, metadata, hierarchy_path, hierarchy_level)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		memory.ID, memory.Text, memory.Category, memory.Scope,
-		memory.Importance, memory.Timestamp, memory.Metadata, hierarchyPathVal, memory.HierarchyLevel)
+		INSERT INTO memories (id, text, abstract, overview, category, scope, importance, timestamp, metadata,
+			hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		memory.ID, memory.Text,
+		nullIfEmpty(memory.Abstract), nullIfEmpty(memory.Overview),
+		memory.Category, memory.Scope,
+		memory.Importance, memory.Timestamp, memory.Metadata,
+		nullIfEmpty(memory.HierarchyPath), memory.HierarchyLevel,
+		nullIfEmpty(memory.ParentID),
+		defaultIfEmpty(memory.NodeType, "chunk"),
+		nullIfEmpty(memory.SourceFile),
+		memory.ChunkIndex, nullIfZero(memory.TokenCount))
 	if err != nil {
 		return "", err
 	}
@@ -207,18 +244,21 @@ func (s *sqliteStore) Insert(memory *Memory) (string, error) {
 
 func (s *sqliteStore) Get(id string) (*Memory, error) {
 	memory := &Memory{}
-	var hierarchyPath *string
+	var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
+	var tokenCount *int
 	err := s.db.QueryRow(`
-		SELECT id, text, category, scope, importance, timestamp, metadata, hierarchy_path, hierarchy_level
+		SELECT id, text, abstract, overview, category, scope, importance, timestamp, metadata,
+			hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count
 		FROM memories WHERE id = ?`, id).Scan(
-		&memory.ID, &memory.Text, &memory.Category, &memory.Scope,
-		&memory.Importance, &memory.Timestamp, &memory.Metadata, &hierarchyPath, &memory.HierarchyLevel)
+		&memory.ID, &memory.Text, &abstract, &overview,
+		&memory.Category, &memory.Scope,
+		&memory.Importance, &memory.Timestamp, &memory.Metadata,
+		&hierarchyPath, &memory.HierarchyLevel,
+		&parentID, &nodeType, &sourceFile, &memory.ChunkIndex, &tokenCount)
 	if err != nil {
 		return nil, err
 	}
-	if hierarchyPath != nil {
-		memory.HierarchyPath = *hierarchyPath
-	}
+	assignNullableFields(memory, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 
 	// 读取向量
 	var vectorData []byte
@@ -245,7 +285,8 @@ func (s *sqliteStore) List(scope string, limit int) ([]*Memory, error) {
 		return nil, fmt.Errorf("limit must be positive, got %d", limit)
 	}
 
-	query := `SELECT id, text, category, scope, importance, timestamp, metadata, hierarchy_path, hierarchy_level
+	query := `SELECT id, text, abstract, overview, category, scope, importance, timestamp, metadata,
+		hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count
 		FROM memories WHERE scope = ? ORDER BY timestamp DESC LIMIT ?`
 	rows, err := s.db.Query(query, scope, limit)
 	if err != nil {
@@ -256,14 +297,16 @@ func (s *sqliteStore) List(scope string, limit int) ([]*Memory, error) {
 	memories := make([]*Memory, 0, limit)
 	for rows.Next() {
 		m := &Memory{}
-		var hierarchyPath *string
-		if err := rows.Scan(&m.ID, &m.Text, &m.Category, &m.Scope,
-			&m.Importance, &m.Timestamp, &m.Metadata, &hierarchyPath, &m.HierarchyLevel); err != nil {
+		var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
+		var tokenCount *int
+		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
+			&m.Category, &m.Scope,
+			&m.Importance, &m.Timestamp, &m.Metadata,
+			&hierarchyPath, &m.HierarchyLevel,
+			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
 			return nil, err
 		}
-		if hierarchyPath != nil {
-			m.HierarchyPath = *hierarchyPath
-		}
+		assignNullableFields(m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 		memories = append(memories, m)
 	}
 
@@ -283,4 +326,130 @@ func (s *sqliteStore) Search(queryVector []float32, queryText string, currentPat
 
 func (s *sqliteStore) Close() error {
 	return s.db.Close()
+}
+
+// GetChildren returns all memories whose parent_id matches the given ID, including their vectors.
+func (s *sqliteStore) GetChildren(parentID string) ([]*Memory, error) {
+	if parentID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT m.id, m.text, m.abstract, m.overview,
+			m.category, m.scope, m.importance, m.timestamp, m.metadata,
+			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
+			m.source_file, m.chunk_index, m.token_count,
+			v.vector
+		FROM memories m
+		LEFT JOIN vectors v ON m.id = v.memory_id
+		WHERE m.parent_id = ? ORDER BY m.chunk_index`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMemoriesWithVector(rows)
+}
+
+// HasChildren returns true if the given memory ID has any child nodes.
+func (s *sqliteStore) HasChildren(id string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE parent_id = ?`, id).Scan(&count)
+	return count > 0, err
+}
+
+// GetContent returns only the full L2 content for a given memory ID (for lazy loading).
+func (s *sqliteStore) GetContent(id string) (string, error) {
+	var content string
+	err := s.db.QueryRow(`SELECT text FROM memories WHERE id = ?`, id).Scan(&content)
+	return content, err
+}
+
+// scanMemoriesWithVector scans rows from a query that includes a trailing v.vector column (nullable).
+func scanMemoriesWithVector(rows *sql.Rows) ([]*Memory, error) {
+	var result []*Memory
+	for rows.Next() {
+		m := &Memory{}
+		var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
+		var tokenCount *int
+		var vectorData []byte
+		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
+			&m.Category, &m.Scope,
+			&m.Importance, &m.Timestamp, &m.Metadata,
+			&hierarchyPath, &m.HierarchyLevel,
+			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount,
+			&vectorData); err != nil {
+			return nil, err
+		}
+		assignNullableFields(m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		if len(vectorData) > 0 {
+			vec, err := DeserializeVector(vectorData)
+			if err == nil {
+				m.Vector = vec
+			}
+		}
+		result = append(result, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// scanMemories scans rows into Memory structs from queries that SELECT the standard 16-column set:
+// id, text, abstract, overview, category, scope, importance, timestamp, metadata,
+// hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count
+func scanMemories(rows *sql.Rows) ([]*Memory, error) {
+	var result []*Memory
+	for rows.Next() {
+		m := &Memory{}
+		var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
+		var tokenCount *int
+		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
+			&m.Category, &m.Scope,
+			&m.Importance, &m.Timestamp, &m.Metadata,
+			&hierarchyPath, &m.HierarchyLevel,
+			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
+			return nil, err
+		}
+		assignNullableFields(m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		result = append(result, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// assignNullableFields copies nullable scan results into the Memory struct.
+func assignNullableFields(m *Memory, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string, tokenCount *int) {
+	if hierarchyPath != nil { m.HierarchyPath = *hierarchyPath }
+	if abstract != nil { m.Abstract = *abstract }
+	if overview != nil { m.Overview = *overview }
+	if parentID != nil { m.ParentID = *parentID }
+	if nodeType != nil { m.NodeType = *nodeType }
+	if sourceFile != nil { m.SourceFile = *sourceFile }
+	if tokenCount != nil { m.TokenCount = *tokenCount }
+}
+
+// nullIfEmpty returns nil for empty strings, or the string value for SQL insertion.
+func nullIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// defaultIfEmpty returns the default value if the string is empty.
+func defaultIfEmpty(s, defaultVal string) string {
+	if s == "" {
+		return defaultVal
+	}
+	return s
+}
+
+// nullIfZero returns nil for zero values, or the int value for SQL insertion.
+func nullIfZero(n int) interface{} {
+	if n == 0 {
+		return nil
+	}
+	return n
 }

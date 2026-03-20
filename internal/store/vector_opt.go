@@ -101,8 +101,10 @@ func (s *sqliteStore) parallelVectorSearch(query []float32, limit int, scopes []
 		scopeFilter += ")"
 	}
 
-	queryStr := `SELECT v.memory_id, v.vector, m.text, m.category, m.scope,
-		m.importance, m.timestamp, m.metadata, m.hierarchy_path, m.hierarchy_level
+	queryStr := `SELECT v.memory_id, v.vector, m.text, m.abstract, m.overview,
+		m.category, m.scope, m.importance, m.timestamp, m.metadata,
+		m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
+		m.source_file, m.chunk_index, m.token_count
 		FROM vectors v JOIN memories m ON v.memory_id = m.id` + scopeFilter
 
 	args := make([]interface{}, len(scopes))
@@ -125,14 +127,17 @@ func (s *sqliteStore) parallelVectorSearch(query []float32, limit int, scopes []
 	items := make([]item, 0, 1024)
 	for rows.Next() {
 		var memoryID, text, category, scope, metadata string
-		var hierarchyPath *string
+		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
 		var importance float64
 		var timestamp int64
-		var hierarchyLevel int
+		var hierarchyLevel, chunkIndex int
+		var tokenCount *int
 		var vectorData []byte
 
-		if err := rows.Scan(&memoryID, &vectorData, &text, &category, &scope,
-			&importance, &timestamp, &metadata, &hierarchyPath, &hierarchyLevel); err != nil {
+		if err := rows.Scan(&memoryID, &vectorData, &text, &abstract, &overview,
+			&category, &scope, &importance, &timestamp, &metadata,
+			&hierarchyPath, &hierarchyLevel, &parentID, &nodeType,
+			&sourceFile, &chunkIndex, &tokenCount); err != nil {
 			return nil, err
 		}
 
@@ -150,15 +155,18 @@ func (s *sqliteStore) parallelVectorSearch(query []float32, limit int, scopes []
 			Timestamp:      timestamp,
 			Metadata:       metadata,
 			HierarchyLevel: hierarchyLevel,
+			ChunkIndex:     chunkIndex,
+			Vector:         vector,
 		}
-		if hierarchyPath != nil {
-			m.HierarchyPath = *hierarchyPath
-		}
+		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 
 		items = append(items, item{
 			memory: m,
 			vector: vector,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// 并行计算相似度（使用归一化向量优化）

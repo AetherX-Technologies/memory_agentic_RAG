@@ -43,6 +43,9 @@ func extractMemoryID(path string) (string, error) {
 	if id == "" || id == "search" || id == "stats" {
 		return "", fmt.Errorf("invalid memory id")
 	}
+	if strings.ContainsAny(id, "/\\..") {
+		return "", fmt.Errorf("invalid memory id")
+	}
 	return id, nil
 }
 
@@ -73,6 +76,7 @@ func (h *Handler) CreateMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/memories/search
+// Supports X-API-Version header: "v1" (default, returns full content) or "v2" (returns abstract + contentURL).
 func (h *Handler) SearchMemories(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -112,7 +116,77 @@ func (h *Handler) SearchMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// API versioning: v2 omits full content, provides lazy-load URL
+	apiVersion := r.Header.Get("X-API-Version")
+	if apiVersion == "v2" {
+		type v2Entry struct {
+			ID         string  `json:"id"`
+			Abstract   string  `json:"abstract"`
+			Overview   string  `json:"overview,omitempty"`
+			Score      float64 `json:"score"`
+			SourceFile string  `json:"source_file,omitempty"`
+			ChunkCount int     `json:"chunk_count,omitempty"`
+			ContentURL string  `json:"content_url"`
+		}
+		v2Results := make([]v2Entry, len(results))
+		for i, res := range results {
+			v2Results[i] = v2Entry{
+				ID:         res.Entry.ID,
+				Abstract:   res.Entry.Abstract,
+				Overview:   res.Entry.Overview,
+				Score:      res.Score,
+				SourceFile: res.Entry.SourceFile,
+				ChunkCount: res.ChunkCount,
+				ContentURL: fmt.Sprintf("/api/memories/%s/content", res.Entry.ID),
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"results": v2Results,
+			"version": "v2",
+		})
+		return
+	}
+
+	// v1 (default): return full results with content
 	writeJSON(w, http.StatusOK, results)
+}
+
+// GET /api/memories/:id/content — lazy-load full L2 content
+func (h *Handler) GetMemoryContent(w http.ResponseWriter, r *http.Request) {
+	id, err := extractContentID(r.URL.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	content, err := h.store.GetContent(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "memory not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":      id,
+		"content": content,
+	})
+}
+
+// extractContentID extracts and validates the memory ID from a /api/memories/{id}/content path.
+func extractContentID(path string) (string, error) {
+	// Expected format: /api/memories/{id}/content
+	trimmed := strings.TrimPrefix(path, "/api/memories/")
+	if !strings.HasSuffix(trimmed, "/content") {
+		return "", fmt.Errorf("invalid content path")
+	}
+	id := strings.TrimSuffix(trimmed, "/content")
+	if id == "" {
+		return "", fmt.Errorf("missing memory id")
+	}
+	// Reject path traversal and nested paths
+	if strings.ContainsAny(id, "/\\..") {
+		return "", fmt.Errorf("invalid memory id")
+	}
+	return id, nil
 }
 
 // DELETE /api/memories/:id

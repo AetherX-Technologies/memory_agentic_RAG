@@ -22,6 +22,7 @@ v1.0.0 已发布，开始 v1.1 浏览器插件开发。
 - [x] M6: 移动端适配（第 6 周）✅ (API完成，框架编译待网络)
 - [x] M7: 优化与发布（第 7 周）✅
 - [ ] M8: 浏览器插件（第 8 周）🚧
+- [x] M9: OpenViking 分层检索 + 语义拆分 ✅
 
 ---
 
@@ -235,19 +236,94 @@ v1.0.0 已发布，开始 v1.1 浏览器插件开发。
   - 修复所有 HIGH/MEDIUM 严重性问题
   - 文档已就绪，可开始实现
 
-### 8.2 核心功能实现
-- [ ] Content Script（对话捕捉）
-- [ ] Background Service Worker（后台服务）
-- [ ] Popup UI（弹窗界面）
-- [ ] 适配器系统（ChatGPT/Claude/Gemini）
+### 8.2 核心功能实现 ✅
+- [x] Content Script — BaseAdapter（去重、防抖 2s、captureExisting、错误处理）
+- [x] Background Service Worker — 消息处理、离线缓存（500 上限）、重试逻辑、RETRY_QUEUE handler
+- [x] Popup UI — 健康检查、队列统计、重试按钮（loading 反馈）
+- [x] 适配器系统 — ChatGPT/Claude/Gemini（含备选选择器）
+- [x] Codex 2 轮审查通过
+
+**修复的关键 bug**：
+- RETRY_QUEUE handler 缺失 → 重试按钮无效
+- offline_queue 存储 bug（`||` 不触发）
+- 5xx 双重重试 → 直接 cacheOffline
+- 去重 hash 缺少 URL → 跨页面误判
 
 ### 8.3 集成与测试
-- [ ] 连接本地 HTTP API
-- [ ] 功能测试
+- [x] 连接本地 HTTP API（POST /api/memories、GET /api/health）
+- [ ] 真实平台测试（需手动验证 CSS 选择器）
 - [ ] 打包发布
 
 **验收标准**：
-- 文档通过 Codex 审查
-- 插件可正常捕捉对话
-- 与本地服务集成成功
+- ✅ 文档通过 Codex 审查
+- ⏳ 插件可正常捕捉对话（需真实平台验证）
+- ✅ 与本地服务集成成功
+
+---
+
+## M9: OpenViking 分层检索 + 语义拆分（第 9-13 周）✅
+
+> 参考文档：
+> - `.context/openviking-go-implementation-plan.md`（已通过 Codex 审查）
+> - `.context/qwen3-semantic-split-integration.md`（已通过 Codex 审查）
+
+### Phase 2: 文档解析器 + 语义拆分 ✅
+- [x] 安装 ONNX Runtime 系统依赖
+- [x] 添加 Go 依赖（onnxruntime_go, tokenizer, changepoint）
+- [x] 实现 LocalEmbedder（`internal/embedder/local.go`）
+- [x] 实现 SmartSplitter（`internal/parser/splitter.go`）
+- [x] 实现语义拆分（`internal/parser/semantic.go`）
+- [x] 实现句子切分（`internal/parser/sentence.go`）
+- [x] 实现 Markdown 结构化拆分（`internal/parser/markdown.go`）
+- [x] 3 轮 Codex 联合审查通过
+- [x] 全部单元测试通过（22/22）
+
+**关键决策**：
+- ED-PELT 不适用于 spike 模式距离数据 → 改用自适应阈值（mean + 2*std）
+- 添加缩写词词典避免句号误切（Dr. vs. etc.）
+
+### Phase 1: 数据模型改造 ✅
+- [x] 修改 SQLite schema（增加 abstract, overview, parent_id, node_type, source_file, chunk_index, token_count）
+- [x] 更新 `internal/store/types.go` 数据结构（Memory + SearchResult）
+- [x] 实现数据迁移脚本（`migrateOpenViking`，幂等性）
+- [x] 更新 Insert/Get/List/VectorSearch/BM25Search 查询
+- [x] 新增 GetChildren/GetContent 方法
+- [x] 迁移验证测试通过（内存数据库）
+- [x] 单元测试通过（FTS5 已修复，`go test -tags fts5 ./internal/store/`）
+
+### Phase 3: L0/L1 生成器 ✅
+- [x] 实现 LLM 客户端封装（`internal/generator/generator.go`，OpenAI 兼容 API）
+- [x] 实现 L0/L1 生成（改进 prompt，temperature=0.3）
+- [x] 批量处理 + SHA256 内容哈希缓存（`cache.go`）
+- [x] 错误重试（线性退避）+ 降级策略（`fallback.go` 规则提取）
+- [x] 单元测试通过（11/11），Codex 2 轮审查通过
+
+### Phase 4: 分层检索引擎 ✅
+- [x] 实现全局搜索策略（`internal/retrieval/retriever.go`）
+- [x] 实现递归搜索算法（优先队列 + 剪枝 + visited 去重）
+- [x] 实现分数传播（alpha=0.7，depth decay=0.9^depth）
+- [x] 实现 RRF 融合（k=60，1-based rank）
+- [x] 实现结果聚合（按 source_file，top-3 abstract 合并）
+- [x] Store: GetChildren 加载向量（LEFT JOIN），HasChildren
+- [x] 单元测试通过（8/8），Codex 2 轮审查通过
+
+**关键优化**：
+- 消除 HasChildren N+1 查询 → 直接 push 子节点到队列
+- Seeds 直接加入 candidates，避免被 RRF 低估
+
+### Phase 5: API 集成 ✅
+- [x] GET /api/memories/search 支持 X-API-Version v1/v2 版本化
+- [x] v2 返回 abstract + content_url，不含完整内容
+- [x] 新增 GET /api/memories/:id/content（按需加载 L2）
+- [x] 路由安全：path-traversal 防护，405 非 GET 请求
+- [x] 单元测试通过（5/5），Codex 3 轮审查通过
+
+### Phase 6: 测试与优化 ✅
+- [x] 端到端集成测试（`cmd/openviking_integration/`，5 个测试全通过）
+- [x] 管道验证：Split → L0/L1 Fallback → Store → Hierarchical Search → API v2
+- [x] Codex 审查通过（1 轮）
+- [x] 性能基准：10000 条 VectorSearch = 77ms（目标 < 300ms ✅）
+- [x] FTS5 修复：扩展搜索路径 + tokenizer 降级（simple → unicode61）
+- [x] 全部 internal 包测试通过（`go test -tags fts5 ./internal/...`）
+- [ ] 文档更新（待整体功能稳定后补充）
 

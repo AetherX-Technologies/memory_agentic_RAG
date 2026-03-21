@@ -14,6 +14,7 @@ models/
 /real_doc_test
 /real_world_test
 /integration_test
+/accuracy_benchmark
 
 # Build artifacts
 simple/build/

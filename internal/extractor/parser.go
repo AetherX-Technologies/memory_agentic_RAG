@@ -20,18 +20,38 @@ var validTypes = map[string]bool{
 func parseExtraction(raw string) ([]RawMemory, error) {
 	cleaned := stripMarkdown(raw)
 
+	// Reject null/blank before attempting JSON parse
+	trimmed := strings.TrimSpace(cleaned)
+	if trimmed == "null" || trimmed == "" {
+		return nil, &ParseError{Raw: raw} // trigger fallback
+	}
+
 	// Attempt 1: direct unmarshal
 	var memories []RawMemory
-	if err := json.Unmarshal([]byte(cleaned), &memories); err == nil {
+	if err := json.Unmarshal([]byte(cleaned), &memories); err == nil && memories != nil {
 		return memories, nil
 	}
 
-	// Attempt 2: extract first [...] substring
-	extracted := extractJSONArray(cleaned)
-	if extracted != "" {
-		if err := json.Unmarshal([]byte(extracted), &memories); err == nil {
-			return memories, nil
+	// Attempt 2: extract [...] substrings and try each until one unmarshals
+	remaining := cleaned
+	for {
+		extracted := extractJSONArray(remaining)
+		if extracted == "" {
+			break
 		}
+		if err := json.Unmarshal([]byte(extracted), &memories); err == nil {
+			if len(memories) > 0 {
+				return memories, nil
+			}
+			// Valid empty array [] — treat as "no memories"
+			return nil, nil
+		}
+		// Skip past this [...] and try the next one
+		idx := strings.Index(remaining, extracted)
+		if idx < 0 {
+			break
+		}
+		remaining = remaining[idx+len(extracted):]
 	}
 
 	// Attempt 3: maybe it's a single object, not array
@@ -49,12 +69,8 @@ func parseExtraction(raw string) ([]RawMemory, error) {
 	}
 
 	// Check if the LLM returned empty array text
-	trimmed := strings.TrimSpace(cleaned)
 	if trimmed == "[]" {
 		return nil, nil // explicit empty — no memories to extract
-	}
-	if trimmed == "" {
-		return nil, &ParseError{Raw: raw} // blank response — trigger fallback
 	}
 
 	return nil, &ParseError{Raw: raw}

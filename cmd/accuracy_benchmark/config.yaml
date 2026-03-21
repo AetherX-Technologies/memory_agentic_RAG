@@ -1,0 +1,26 @@
+# 准确率对比测试配置
+# 复用 real_world_test 的线上模型配置
+#
+# API 密钥从环境变量读取：
+#   export BENCH_API_KEY="your-api-key-here"
+
+# 线上嵌入模型（Qwen3-Embedding-4B）
+embedding_api:
+  provider: "openai"
+  api_key: "${BENCH_API_KEY}"
+  model: "Qwen/Qwen3-Embedding-4B"
+  endpoint: "https://api.xiaocaseai.com/v1/embeddings"
+
+# 本地嵌入模型（Qwen3-Embedding-0.6B ONNX UINT8）
+embedding_local:
+  model_path: "models/qwen3-embedding-0.6b-onnx-uint8/dynamic_uint8.onnx"
+
+# 重排模型（Qwen3-Reranker-4B）
+rerank:
+  enabled: true
+  provider: "jina"
+  api_key: "${BENCH_API_KEY}"
+  model: "Qwen/Qwen3-Reranker-4B"
+  endpoint: "https://api.xiaocaseai.com/v1/rerank"
+  blend_weight: 0.6
+  max_candidates: 50

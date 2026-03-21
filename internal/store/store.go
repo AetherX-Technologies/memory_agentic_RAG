@@ -181,6 +181,11 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to migrate openviking: %w", err)
 	}
 
+	// 执行 AI 记忆系统字段迁移
+	if err := migrateMemorySystem(db); err != nil {
+		return fmt.Errorf("failed to migrate memory system: %w", err)
+	}
+
 	return nil
 }
 
@@ -198,11 +203,22 @@ func (s *sqliteStore) Insert(memory *Memory) (string, error) {
 	}
 	defer tx.Rollback()
 
+	// Ensure confidence default and floor
+	if memory.Confidence == 0 {
+		memory.Confidence = 0.5 // column default
+	} else if memory.Confidence < 0.05 {
+		memory.Confidence = 0.05
+	}
+
 	// 插入记忆
+	// Note: content_hash is NOT auto-computed here. Callers (e.g. memory extractor in Phase B)
+	// should set ContentHash explicitly when dedup is desired. Document chunks with duplicate
+	// text across different files/scopes are legitimate and should not be rejected.
 	_, err = tx.Exec(`
 		INSERT INTO memories (id, text, abstract, overview, category, scope, importance, timestamp, metadata,
-			hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count,
+			memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		memory.ID, memory.Text,
 		nullIfEmpty(memory.Abstract), nullIfEmpty(memory.Overview),
 		memory.Category, memory.Scope,
@@ -211,7 +227,12 @@ func (s *sqliteStore) Insert(memory *Memory) (string, error) {
 		nullIfEmpty(memory.ParentID),
 		defaultIfEmpty(memory.NodeType, "chunk"),
 		nullIfEmpty(memory.SourceFile),
-		memory.ChunkIndex, nullIfZero(memory.TokenCount))
+		memory.ChunkIndex, nullIfZero(memory.TokenCount),
+		defaultIfEmpty(memory.MemoryType, "fact"),
+		memory.Confidence,
+		memory.AccessCount, memory.LastAccessed, memory.ExpiresAt,
+		nullIfEmpty(memory.SourceConv), nullIfEmpty(memory.ContentHash),
+		boolToInt(memory.Expired))
 	if err != nil {
 		return "", err
 	}
@@ -246,19 +267,25 @@ func (s *sqliteStore) Get(id string) (*Memory, error) {
 	memory := &Memory{}
 	var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
 	var tokenCount *int
+	var sourceConv, contentHash *string
+	var expired int
 	err := s.db.QueryRow(`
 		SELECT id, text, abstract, overview, category, scope, importance, timestamp, metadata,
-			hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count
+			hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count,
+			memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired
 		FROM memories WHERE id = ?`, id).Scan(
 		&memory.ID, &memory.Text, &abstract, &overview,
 		&memory.Category, &memory.Scope,
 		&memory.Importance, &memory.Timestamp, &memory.Metadata,
 		&hierarchyPath, &memory.HierarchyLevel,
-		&parentID, &nodeType, &sourceFile, &memory.ChunkIndex, &tokenCount)
+		&parentID, &nodeType, &sourceFile, &memory.ChunkIndex, &tokenCount,
+		&memory.MemoryType, &memory.Confidence, &memory.AccessCount, &memory.LastAccessed, &memory.ExpiresAt,
+		&sourceConv, &contentHash, &expired)
 	if err != nil {
 		return nil, err
 	}
 	assignNullableFields(memory, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+	assignMemSysNullable(memory, sourceConv, contentHash, expired)
 
 	// 读取向量
 	var vectorData []byte
@@ -286,7 +313,8 @@ func (s *sqliteStore) List(scope string, limit int) ([]*Memory, error) {
 	}
 
 	query := `SELECT id, text, abstract, overview, category, scope, importance, timestamp, metadata,
-		hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count
+		hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count,
+		memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired
 		FROM memories WHERE scope = ? ORDER BY timestamp DESC LIMIT ?`
 	rows, err := s.db.Query(query, scope, limit)
 	if err != nil {
@@ -299,14 +327,19 @@ func (s *sqliteStore) List(scope string, limit int) ([]*Memory, error) {
 		m := &Memory{}
 		var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
 		var tokenCount *int
+		var sourceConv, contentHash *string
+		var expired int
 		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
 			&m.Category, &m.Scope,
 			&m.Importance, &m.Timestamp, &m.Metadata,
 			&hierarchyPath, &m.HierarchyLevel,
-			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
+			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount,
+			&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+			&sourceConv, &contentHash, &expired); err != nil {
 			return nil, err
 		}
 		assignNullableFields(m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(m, sourceConv, contentHash, expired)
 		memories = append(memories, m)
 	}
 
@@ -338,10 +371,13 @@ func (s *sqliteStore) GetChildren(parentID string) ([]*Memory, error) {
 			m.category, m.scope, m.importance, m.timestamp, m.metadata,
 			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
 			m.source_file, m.chunk_index, m.token_count,
+			m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+			m.source_conv, m.content_hash, m.expired,
 			v.vector
 		FROM memories m
 		LEFT JOIN vectors v ON m.id = v.memory_id
-		WHERE m.parent_id = ? ORDER BY m.chunk_index`, parentID)
+		WHERE m.parent_id = ? AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
+		ORDER BY m.chunk_index`, parentID)
 	if err != nil {
 		return nil, err
 	}
@@ -364,22 +400,31 @@ func (s *sqliteStore) GetContent(id string) (string, error) {
 }
 
 // scanMemoriesWithVector scans rows from a query that includes a trailing v.vector column (nullable).
+// Expected column order: id, text, abstract, overview, category, scope, importance, timestamp, metadata,
+// hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count,
+// memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired,
+// vector
 func scanMemoriesWithVector(rows *sql.Rows) ([]*Memory, error) {
 	var result []*Memory
 	for rows.Next() {
 		m := &Memory{}
 		var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
 		var tokenCount *int
+		var sourceConv, contentHash *string
+		var expired int
 		var vectorData []byte
 		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
 			&m.Category, &m.Scope,
 			&m.Importance, &m.Timestamp, &m.Metadata,
 			&hierarchyPath, &m.HierarchyLevel,
 			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount,
+			&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+			&sourceConv, &contentHash, &expired,
 			&vectorData); err != nil {
 			return nil, err
 		}
 		assignNullableFields(m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(m, sourceConv, contentHash, expired)
 		if len(vectorData) > 0 {
 			vec, err := DeserializeVector(vectorData)
 			if err == nil {
@@ -394,23 +439,29 @@ func scanMemoriesWithVector(rows *sql.Rows) ([]*Memory, error) {
 	return result, nil
 }
 
-// scanMemories scans rows into Memory structs from queries that SELECT the standard 16-column set:
+// scanMemories scans rows into Memory structs from queries that SELECT the standard 24-column set:
 // id, text, abstract, overview, category, scope, importance, timestamp, metadata,
-// hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count
+// hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count,
+// memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired
 func scanMemories(rows *sql.Rows) ([]*Memory, error) {
 	var result []*Memory
 	for rows.Next() {
 		m := &Memory{}
 		var hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string
 		var tokenCount *int
+		var sourceConv, contentHash *string
+		var expired int
 		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
 			&m.Category, &m.Scope,
 			&m.Importance, &m.Timestamp, &m.Metadata,
 			&hierarchyPath, &m.HierarchyLevel,
-			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
+			&parentID, &nodeType, &sourceFile, &m.ChunkIndex, &tokenCount,
+			&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+			&sourceConv, &contentHash, &expired); err != nil {
 			return nil, err
 		}
 		assignNullableFields(m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(m, sourceConv, contentHash, expired)
 		result = append(result, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -428,6 +479,13 @@ func assignNullableFields(m *Memory, hierarchyPath, abstract, overview, parentID
 	if nodeType != nil { m.NodeType = *nodeType }
 	if sourceFile != nil { m.SourceFile = *sourceFile }
 	if tokenCount != nil { m.TokenCount = *tokenCount }
+}
+
+// assignMemSysNullable copies nullable memory-system scan results into the Memory struct.
+func assignMemSysNullable(m *Memory, sourceConv, contentHash *string, expired int) {
+	if sourceConv != nil { m.SourceConv = *sourceConv }
+	if contentHash != nil { m.ContentHash = *contentHash }
+	m.Expired = expired != 0
 }
 
 // nullIfEmpty returns nil for empty strings, or the string value for SQL insertion.
@@ -452,4 +510,12 @@ func nullIfZero(n int) interface{} {
 		return nil
 	}
 	return n
+}
+
+// boolToInt converts a bool to SQLite integer (0/1).
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

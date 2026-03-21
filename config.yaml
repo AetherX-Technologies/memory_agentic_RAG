@@ -1,0 +1,63 @@
+# HybridMem-RAG 统一配置文件
+# 所有模型、API、行为参数在此统一管理
+
+store:
+  db_path: "data/memories.db"
+  vector_dim: 0  # 0 = 不校验维度，自动适配
+
+# 嵌入模型配置
+# provider: "local" | "jina" | "openai"
+# - local: 使用本地 Qwen3 ONNX 模型（免费，离线可用）
+# - jina:  使用 Jina Embedding API（需 API Key）
+# - openai: 使用 OpenAI Embedding API（需 API Key）
+embedding:
+  provider: "local"
+  local:
+    model_path: "models/qwen3-embedding-0.6b-onnx-uint8/dynamic_uint8.onnx"
+    batch_size: 16
+    max_seq_len: 512
+  jina:
+    api_key: ""  # 填入 Jina API Key
+    model: "jina-embeddings-v3"
+    endpoint: "https://api.jina.ai/v1/embeddings"
+  openai:
+    api_key: ""  # 填入 OpenAI API Key
+    model: "text-embedding-3-small"
+    endpoint: "https://api.openai.com/v1/embeddings"
+
+# 重排模型配置
+# 重排会在混合检索后对结果重新排序，提升准确率
+rerank:
+  enabled: false
+  provider: "jina"
+  api_key: ""  # 填入 Jina API Key（和 embedding 共用）
+  model: "jina-reranker-v2-base-multilingual"
+  blend_weight: 0.6       # rerank 分数权重
+  max_candidates: 50      # 最多重排候选数
+
+# LLM 配置（用于 L0/L1 摘要生成、记忆提取）
+llm:
+  provider: "openai"
+  api_key: ""  # 填入 OpenAI API Key
+  model: "gpt-4o-mini"
+  endpoint: "https://api.openai.com/v1/chat/completions"
+  timeout: 30
+  concurrency: 5
+
+# 文档拆分配置
+splitter:
+  max_chunk_size: 512
+  min_chunk_size: 256
+  enable_semantic: true   # true = 用本地模型做语义拆分（大 chunk 自动拆分）
+  min_segment: 3
+
+# 检索策略
+# mode: "bm25" | "vector" | "hybrid" | "openviking"
+# - bm25: 仅关键词匹配（快但中文差）
+# - vector: 仅向量语义检索
+# - hybrid: BM25 + 向量融合（推荐）
+# - openviking: 分层递归检索（大文档库推荐）
+retrieval:
+  mode: "hybrid"
+  alpha: 0.7       # OpenViking 分数传播权重
+  max_depth: 5     # OpenViking 最大递归深度

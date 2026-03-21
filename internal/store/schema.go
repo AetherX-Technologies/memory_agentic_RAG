@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"os"
 )
 
 const (
@@ -153,6 +154,86 @@ func migrateOpenViking(db *sql.DB) error {
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// memorySystemColumns lists the columns added for the AI memory system.
+var memorySystemColumns = []struct {
+	Name string
+	DDL  string
+}{
+	{"memory_type", "TEXT DEFAULT 'fact'"},
+	{"confidence", "REAL DEFAULT 0.5"},
+	{"access_count", "INTEGER DEFAULT 0"},
+	{"last_accessed", "INTEGER DEFAULT 0"},
+	{"expires_at", "INTEGER DEFAULT 0"},
+	{"source_conv", "TEXT DEFAULT NULL"},
+	{"content_hash", "TEXT DEFAULT NULL"},
+	{"expired", "INTEGER DEFAULT 0"},
+}
+
+// migrateMemorySystem adds AI memory system columns and tables (idempotent).
+func migrateMemorySystem(db *sql.DB) error {
+	// Add columns
+	for _, col := range memorySystemColumns {
+		var count int
+		err := db.QueryRow(
+			fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?`, tableMemories),
+			col.Name,
+		).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("failed to check column %s: %w", col.Name, err)
+		}
+		if count == 0 {
+			_, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, tableMemories, col.Name, col.DDL))
+			if err != nil {
+				return fmt.Errorf("failed to add column %s: %w", col.Name, err)
+			}
+		}
+	}
+
+	// Create indexes
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_memory_type ON memories(memory_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_expires_at ON memories(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_source_conv ON memories(source_conv)`,
+	}
+	for _, idx := range indexes {
+		if _, err := db.Exec(idx); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	// Unique partial index on content_hash (dedup guard)
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash_unique ON memories(content_hash) WHERE content_hash IS NOT NULL`); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: content_hash unique index creation failed (dedup guard inactive): %v\n", err)
+	}
+
+	// Create junction tables
+	tables := []string{
+		`CREATE TABLE IF NOT EXISTS memory_supersessions (
+			old_id TEXT NOT NULL,
+			new_id TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (old_id, new_id),
+			FOREIGN KEY (old_id) REFERENCES memories(id) ON DELETE CASCADE,
+			FOREIGN KEY (new_id) REFERENCES memories(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_supersession_old ON memory_supersessions(old_id)`,
+		`CREATE TABLE IF NOT EXISTS memory_tags (
+			memory_id TEXT NOT NULL,
+			tag TEXT NOT NULL,
+			PRIMARY KEY (memory_id, tag),
+			FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tag ON memory_tags(tag)`,
+	}
+	for _, ddl := range tables {
+		if _, err := db.Exec(ddl); err != nil {
+			return fmt.Errorf("failed to create memory system table: %w", err)
 		}
 	}
 

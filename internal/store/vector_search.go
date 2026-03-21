@@ -45,9 +45,9 @@ func (s *sqliteStore) VectorSearch(query []float32, limit int, scopes []string) 
 	NormalizeVector(queryNorm)
 
 	// 构建 scope 过滤条件
-	scopeFilter := ""
+	scopeFilter := " WHERE m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))"
 	if len(scopes) > 0 {
-		scopeFilter = " WHERE m.scope IN ("
+		scopeFilter += " AND m.scope IN ("
 		for i := range scopes {
 			if i > 0 {
 				scopeFilter += ","
@@ -61,7 +61,9 @@ func (s *sqliteStore) VectorSearch(query []float32, limit int, scopes []string) 
 	queryStr := `SELECT v.memory_id, v.vector, m.text, m.abstract, m.overview,
 		m.category, m.scope, m.importance, m.timestamp, m.metadata,
 		m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
-		m.source_file, m.chunk_index, m.token_count
+		m.source_file, m.chunk_index, m.token_count,
+		m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+		m.source_conv, m.content_hash, m.expired
 		FROM vectors v JOIN memories m ON v.memory_id = m.id` + scopeFilter
 
 	args := make([]interface{}, len(scopes))
@@ -84,11 +86,19 @@ func (s *sqliteStore) VectorSearch(query []float32, limit int, scopes []string) 
 		var hierarchyLevel, chunkIndex int
 		var tokenCount *int
 		var vectorData []byte
+		var memoryType string
+		var confidence float64
+		var accessCount int
+		var lastAccessed, expiresAt int64
+		var sourceConv, contentHash *string
+		var expired int
 
 		if err := rows.Scan(&memoryID, &vectorData, &text, &abstract, &overview,
 			&category, &scope, &importance, &timestamp, &metadata,
 			&hierarchyPath, &hierarchyLevel, &parentID, &nodeType,
-			&sourceFile, &chunkIndex, &tokenCount); err != nil {
+			&sourceFile, &chunkIndex, &tokenCount,
+			&memoryType, &confidence, &accessCount, &lastAccessed, &expiresAt,
+			&sourceConv, &contentHash, &expired); err != nil {
 			return nil, err
 		}
 
@@ -108,8 +118,14 @@ func (s *sqliteStore) VectorSearch(query []float32, limit int, scopes []string) 
 			Metadata:       metadata,
 			HierarchyLevel: hierarchyLevel,
 			ChunkIndex:     chunkIndex,
+			MemoryType:     memoryType,
+			Confidence:     confidence,
+			AccessCount:    accessCount,
+			LastAccessed:   lastAccessed,
+			ExpiresAt:      expiresAt,
 		}
 		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(&m, sourceConv, contentHash, expired)
 		m.Vector = vector
 		results = append(results, SearchResult{
 			Entry: m,

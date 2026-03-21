@@ -25,10 +25,12 @@ func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]Se
 		SELECT f.memory_id, f.rank, m.text, m.abstract, m.overview,
 			m.category, m.scope, m.importance, m.timestamp, m.metadata,
 			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
-			m.source_file, m.chunk_index, m.token_count
+			m.source_file, m.chunk_index, m.token_count,
+			m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+			m.source_conv, m.content_hash, m.expired
 		FROM fts_memories f
 		JOIN memories m ON f.memory_id = m.id
-		WHERE fts_memories MATCH ?` + scopeFilter + `
+		WHERE fts_memories MATCH ? AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))` + scopeFilter + `
 		ORDER BY f.rank
 		LIMIT ?`
 
@@ -47,11 +49,19 @@ func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]Se
 		var hierarchyLevel, chunkIndex int
 		var tokenCount *int
 		var ftsRank float64
+		var memoryType string
+		var confidence float64
+		var accessCount int
+		var lastAccessed, expiresAt int64
+		var sourceConv, contentHash *string
+		var expired int
 
 		if err := rows.Scan(&memoryID, &ftsRank, &text, &abstract, &overview,
 			&category, &scope, &importance, &timestamp, &metadata,
 			&hierarchyPath, &hierarchyLevel, &parentID, &nodeType,
-			&sourceFile, &chunkIndex, &tokenCount); err != nil {
+			&sourceFile, &chunkIndex, &tokenCount,
+			&memoryType, &confidence, &accessCount, &lastAccessed, &expiresAt,
+			&sourceConv, &contentHash, &expired); err != nil {
 			return nil, err
 		}
 
@@ -71,8 +81,14 @@ func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]Se
 			Metadata:       metadata,
 			HierarchyLevel: hierarchyLevel,
 			ChunkIndex:     chunkIndex,
+			MemoryType:     memoryType,
+			Confidence:     confidence,
+			AccessCount:    accessCount,
+			LastAccessed:   lastAccessed,
+			ExpiresAt:      expiresAt,
 		}
 		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(&m, sourceConv, contentHash, expired)
 
 		results = append(results, SearchResult{
 			Entry: m,

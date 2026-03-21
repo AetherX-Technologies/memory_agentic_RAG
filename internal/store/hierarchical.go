@@ -72,10 +72,13 @@ func (s *sqliteStore) vectorSearchInLevel(queryVec []float32, level string, limi
 		SELECT m.id, m.text, v.vector, m.abstract, m.overview,
 			m.category, m.scope, m.importance, m.timestamp, m.metadata,
 			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
-			m.source_file, m.chunk_index, m.token_count
+			m.source_file, m.chunk_index, m.token_count,
+			m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+			m.source_conv, m.content_hash, m.expired
 		FROM memories m
 		JOIN vectors v ON m.id = v.memory_id
-		WHERE (m.hierarchy_path = ? OR m.hierarchy_path LIKE ? ESCAPE '\')` + scopeFilter
+		WHERE m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
+		  AND (m.hierarchy_path = ? OR m.hierarchy_path LIKE ? ESCAPE '\')` + scopeFilter
 
 	args := []interface{}{level, escapeLike(level) + "/%"}
 	args = append(args, scopeArgs...)
@@ -91,14 +94,19 @@ func (s *sqliteStore) vectorSearchInLevel(queryVec []float32, level string, limi
 		var vectorBlob []byte
 		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
 		var tokenCount *int
+		var sourceConv, contentHash *string
+		var expired int
 		if err := rows.Scan(&m.ID, &m.Text, &vectorBlob, &abstract, &overview,
 			&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
 			&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
-			&sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
+			&sourceFile, &m.ChunkIndex, &tokenCount,
+			&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+			&sourceConv, &contentHash, &expired); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to scan row in vectorSearchInLevel: %v\n", err)
 			continue
 		}
 		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(&m, sourceConv, contentHash, expired)
 
 		vec, err := DeserializeVector(vectorBlob)
 		if err != nil {
@@ -135,10 +143,12 @@ func (s *sqliteStore) bm25SearchInLevel(query string, level string, limit int, s
 			m.category, m.scope, m.importance, m.timestamp, m.metadata,
 			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
 			m.source_file, m.chunk_index, m.token_count,
+			m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+			m.source_conv, m.content_hash, m.expired,
 			rank as score
 		FROM fts_memories
 		JOIN memories m ON fts_memories.memory_id = m.id
-		WHERE fts_memories MATCH ?
+		WHERE fts_memories MATCH ? AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
 		  AND (m.hierarchy_path = ? OR m.hierarchy_path LIKE ? ESCAPE '\')` + scopeFilter + `
 		ORDER BY score ASC
 		LIMIT ?`
@@ -158,15 +168,20 @@ func (s *sqliteStore) bm25SearchInLevel(query string, level string, limit int, s
 		var score float64
 		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
 		var tokenCount *int
+		var sourceConv, contentHash *string
+		var expired int
 		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
 			&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
 			&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
 			&sourceFile, &m.ChunkIndex, &tokenCount,
+			&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+			&sourceConv, &contentHash, &expired,
 			&score); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to scan row in bm25SearchInLevel: %v\n", err)
 			continue
 		}
 		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(&m, sourceConv, contentHash, expired)
 		results = append(results, SearchResult{Entry: m, Score: score})
 	}
 	if err := rows.Err(); err != nil {
@@ -296,8 +311,8 @@ func (s *sqliteStore) HierarchicalHybridSearch(queryVec []float32, query string,
 
 // searchGlobalMemories 搜索无层次路径的记忆
 func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, limit int, scopes []string) ([]SearchResult, error) {
-	// 只搜索 hierarchy_path IS NULL 的全局记忆
-	scopeFilter := " AND m.hierarchy_path IS NULL"
+	// 只搜索 hierarchy_path IS NULL 的全局记忆（排除已过期）
+	scopeFilter := " AND m.hierarchy_path IS NULL AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))"
 	if len(scopes) > 0 {
 		placeholders := strings.Repeat("?,", len(scopes)-1) + "?"
 		scopeFilter += " AND m.scope IN (" + placeholders + ")"
@@ -309,7 +324,9 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 			SELECT m.id, m.text, v.vector, m.abstract, m.overview,
 				m.category, m.scope, m.importance, m.timestamp, m.metadata,
 				m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
-				m.source_file, m.chunk_index, m.token_count
+				m.source_file, m.chunk_index, m.token_count,
+				m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+				m.source_conv, m.content_hash, m.expired
 			FROM memories m
 			JOIN vectors v ON m.id = v.memory_id
 			WHERE 1=1` + scopeFilter
@@ -331,14 +348,19 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 			var vectorBlob []byte
 			var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
 			var tokenCount *int
+			var sourceConv, contentHash *string
+			var expired int
 			if err := rows.Scan(&m.ID, &m.Text, &vectorBlob, &abstract, &overview,
 				&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
 				&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
-				&sourceFile, &m.ChunkIndex, &tokenCount); err != nil {
+				&sourceFile, &m.ChunkIndex, &tokenCount,
+				&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+				&sourceConv, &contentHash, &expired); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to scan row in searchGlobalMemories: %v\n", err)
 				continue
 			}
 			assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+			assignMemSysNullable(&m, sourceConv, contentHash, expired)
 			vec, err := DeserializeVector(vectorBlob)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to deserialize vector for memory %s: %v\n", m.ID, err)
@@ -370,6 +392,8 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 			m.category, m.scope, m.importance, m.timestamp, m.metadata,
 			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
 			m.source_file, m.chunk_index, m.token_count,
+			m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+			m.source_conv, m.content_hash, m.expired,
 			rank as score
 		FROM fts_memories
 		JOIN memories m ON fts_memories.memory_id = m.id
@@ -395,15 +419,20 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 		var score float64
 		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
 		var tokenCount *int
+		var sourceConv, contentHash *string
+		var expired int
 		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
 			&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
 			&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
 			&sourceFile, &m.ChunkIndex, &tokenCount,
+			&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+			&sourceConv, &contentHash, &expired,
 			&score); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to scan row in searchGlobalMemories BM25: %v\n", err)
 			continue
 		}
 		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+		assignMemSysNullable(&m, sourceConv, contentHash, expired)
 		// BM25 score is negative (smaller-is-better), convert to positive
 		results = append(results, SearchResult{Entry: m, Score: -score})
 	}

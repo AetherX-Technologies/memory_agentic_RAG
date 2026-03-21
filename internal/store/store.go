@@ -91,6 +91,8 @@ type Store interface {
 	GetChildren(parentID string) ([]*Memory, error)
 	HasChildren(id string) (bool, error)
 	GetContent(id string) (string, error)
+	UpdateConfidence(id string, delta float64) error
+	RecordSupersession(oldID, newID string) error
 	Close() error
 }
 
@@ -397,6 +399,44 @@ func (s *sqliteStore) GetContent(id string) (string, error) {
 	var content string
 	err := s.db.QueryRow(`SELECT text FROM memories WHERE id = ?`, id).Scan(&content)
 	return content, err
+}
+
+// UpdateConfidence adjusts a memory's confidence by delta, clamped to [0.05, 1.0].
+func (s *sqliteStore) UpdateConfidence(id string, delta float64) error {
+	_, err := s.db.Exec(`
+		UPDATE memories SET confidence = MIN(1.0, MAX(0.05, confidence + ?))
+		WHERE id = ?`, delta, id)
+	return err
+}
+
+// RecordSupersession records that newID supersedes oldID, and reduces oldID's importance.
+func (s *sqliteStore) RecordSupersession(oldID, newID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`
+		INSERT OR IGNORE INTO memory_supersessions (old_id, new_id, created_at)
+		VALUES (?, ?, ?)`, oldID, newID, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+
+	// Only reduce importance if a new row was actually inserted (idempotent)
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows > 0 {
+		_, err = tx.Exec(`UPDATE memories SET importance = importance * 0.3 WHERE id = ?`, oldID)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 // scanMemoriesWithVector scans rows from a query that includes a trailing v.vector column (nullable).

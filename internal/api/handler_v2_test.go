@@ -63,7 +63,9 @@ func (m *mockStore) GetContent(id string) (string, error) {
 	}
 	return mem.Text, nil
 }
-func (m *mockStore) Close() error { return nil }
+func (m *mockStore) Close() error                                    { return nil }
+func (m *mockStore) UpdateConfidence(id string, delta float64) error  { return nil }
+func (m *mockStore) RecordSupersession(oldID, newID string) error     { return nil }
 
 // --- Tests ---
 

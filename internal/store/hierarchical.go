@@ -77,7 +77,7 @@ func (s *sqliteStore) vectorSearchInLevel(queryVec []float32, level string, limi
 			m.source_conv, m.content_hash, m.expired
 		FROM memories m
 		JOIN vectors v ON m.id = v.memory_id
-		WHERE m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
+		WHERE m.expired = 0 AND m.deleted_at = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
 		  AND (m.hierarchy_path = ? OR m.hierarchy_path LIKE ? ESCAPE '\')` + scopeFilter
 
 	args := []interface{}{level, escapeLike(level) + "/%"}
@@ -148,7 +148,7 @@ func (s *sqliteStore) bm25SearchInLevel(query string, level string, limit int, s
 			rank as score
 		FROM fts_memories
 		JOIN memories m ON fts_memories.memory_id = m.id
-		WHERE fts_memories MATCH ? AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
+		WHERE fts_memories MATCH ? AND m.expired = 0 AND m.deleted_at = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
 		  AND (m.hierarchy_path = ? OR m.hierarchy_path LIKE ? ESCAPE '\')` + scopeFilter + `
 		ORDER BY score ASC
 		LIMIT ?`
@@ -312,7 +312,7 @@ func (s *sqliteStore) HierarchicalHybridSearch(queryVec []float32, query string,
 // searchGlobalMemories 搜索无层次路径的记忆
 func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, limit int, scopes []string) ([]SearchResult, error) {
 	// 只搜索 hierarchy_path IS NULL 的全局记忆（排除已过期）
-	scopeFilter := " AND m.hierarchy_path IS NULL AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))"
+	scopeFilter := " AND m.hierarchy_path IS NULL AND m.expired = 0 AND m.deleted_at = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))"
 	if len(scopes) > 0 {
 		placeholders := strings.Repeat("?,", len(scopes)-1) + "?"
 		scopeFilter += " AND m.scope IN (" + placeholders + ")"

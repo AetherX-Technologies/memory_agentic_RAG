@@ -93,6 +93,11 @@ type Store interface {
 	GetContent(id string) (string, error)
 	UpdateConfidence(id string, delta float64) error
 	RecordSupersession(oldID, newID string) error
+	SoftDelete(id string, now int64) error
+	Restore(id string) error
+	ListTrash(limit int) ([]*Memory, error)
+	PermanentDelete(id string) error
+	RunCleanup(now int64) error
 	Close() error
 }
 
@@ -378,7 +383,7 @@ func (s *sqliteStore) GetChildren(parentID string) ([]*Memory, error) {
 			v.vector
 		FROM memories m
 		LEFT JOIN vectors v ON m.id = v.memory_id
-		WHERE m.parent_id = ? AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
+		WHERE m.parent_id = ? AND m.expired = 0 AND m.deleted_at = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))
 		ORDER BY m.chunk_index`, parentID)
 	if err != nil {
 		return nil, err
@@ -437,6 +442,89 @@ func (s *sqliteStore) RecordSupersession(oldID, newID string) error {
 	}
 
 	return tx.Commit()
+}
+
+// SoftDelete moves a memory to the trash bin.
+func (s *sqliteStore) SoftDelete(id string, now int64) error {
+	_, err := s.db.Exec(`UPDATE memories SET deleted_at = ? WHERE id = ? AND deleted_at = 0`, now, id)
+	return err
+}
+
+// Restore recovers a memory from the trash bin.
+// If expires_at has already passed, it's also cleared to avoid immediate re-expiration.
+func (s *sqliteStore) Restore(id string) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`UPDATE memories SET deleted_at = 0, expired = 0,
+		expires_at = CASE WHEN expires_at > 0 AND expires_at < ? THEN 0 ELSE expires_at END
+		WHERE id = ? AND deleted_at > 0`, now, id)
+	return err
+}
+
+// ListTrash returns soft-deleted memories ordered by deletion time (newest first).
+func (s *sqliteStore) ListTrash(limit int) ([]*Memory, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`SELECT id, text, category, scope, importance, timestamp, metadata,
+		memory_type, confidence, deleted_at
+		FROM memories WHERE deleted_at > 0 ORDER BY deleted_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*Memory
+	for rows.Next() {
+		m := &Memory{}
+		if err := rows.Scan(&m.ID, &m.Text, &m.Category, &m.Scope, &m.Importance, &m.Timestamp,
+			&m.Metadata, &m.MemoryType, &m.Confidence, &m.DeletedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, m)
+	}
+	return result, rows.Err()
+}
+
+// PermanentDelete removes a memory from the database permanently.
+func (s *sqliteStore) PermanentDelete(id string) error {
+	_, err := s.db.Exec(`DELETE FROM memories WHERE id = ?`, id)
+	return err
+}
+
+// RunCleanup performs periodic maintenance: expire, soft-delete low-value, purge old trash.
+func (s *sqliteStore) RunCleanup(now int64) error {
+	// 1. Mark expired memories
+	if _, err := s.db.Exec(`UPDATE memories SET expired = 1
+		WHERE expires_at > 0 AND expires_at < ? AND expired = 0 AND deleted_at = 0`, now); err != nil {
+		return fmt.Errorf("cleanup: mark expired: %w", err)
+	}
+
+	// 2. Soft-delete low-value memories (>180 days, low importance+confidence, never accessed)
+	cutoff := now - 180*86400
+	if _, err := s.db.Exec(`UPDATE memories SET deleted_at = ?
+		WHERE deleted_at = 0
+		  AND importance < 0.1 AND confidence < 0.1
+		  AND access_count = 0 AND timestamp < ?
+		  AND id NOT IN (SELECT new_id FROM memory_supersessions)
+		  AND id NOT IN (SELECT old_id FROM memory_supersessions)`, now, cutoff); err != nil {
+		return fmt.Errorf("cleanup: soft-delete low-value: %w", err)
+	}
+
+	// 3. Soft-delete expired memories created >30 days ago
+	expiredCutoff := now - 30*86400
+	if _, err := s.db.Exec(`UPDATE memories SET deleted_at = ?
+		WHERE deleted_at = 0 AND expired = 1 AND timestamp < ?`, now, expiredCutoff); err != nil {
+		return fmt.Errorf("cleanup: soft-delete expired: %w", err)
+	}
+
+	// 4. Permanently delete trash items >30 days old
+	trashCutoff := now - 30*86400
+	if _, err := s.db.Exec(`DELETE FROM memories
+		WHERE deleted_at > 0 AND deleted_at < ?`, trashCutoff); err != nil {
+		return fmt.Errorf("cleanup: purge trash: %w", err)
+	}
+
+	return nil
 }
 
 // scanMemoriesWithVector scans rows from a query that includes a trailing v.vector column (nullable).

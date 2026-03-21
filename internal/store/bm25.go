@@ -30,7 +30,7 @@ func (s *sqliteStore) BM25Search(query string, limit int, scopes []string) ([]Se
 			m.source_conv, m.content_hash, m.expired
 		FROM fts_memories f
 		JOIN memories m ON f.memory_id = m.id
-		WHERE fts_memories MATCH ? AND m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))` + scopeFilter + `
+		WHERE fts_memories MATCH ? AND m.expired = 0 AND m.deleted_at = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))` + scopeFilter + `
 		ORDER BY f.rank
 		LIMIT ?`
 

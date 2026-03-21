@@ -89,7 +89,7 @@ func (s *sqliteStore) parallelVectorSearch(query []float32, limit int, scopes []
 		return nil, nil
 	}
 
-	scopeFilter := " WHERE m.expired = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))"
+	scopeFilter := " WHERE m.expired = 0 AND m.deleted_at = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))"
 	if len(scopes) > 0 {
 		scopeFilter += " AND m.scope IN ("
 		for i := range scopes {

@@ -173,6 +173,7 @@ var memorySystemColumns = []struct {
 	{"source_conv", "TEXT DEFAULT NULL"},
 	{"content_hash", "TEXT DEFAULT NULL"},
 	{"expired", "INTEGER DEFAULT 0"},
+	{"deleted_at", "INTEGER DEFAULT 0"},
 }
 
 // migrateMemorySystem adds AI memory system columns and tables (idempotent).
@@ -200,6 +201,7 @@ func migrateMemorySystem(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_memory_type ON memories(memory_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_expires_at ON memories(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_source_conv ON memories(source_conv)`,
+		`CREATE INDEX IF NOT EXISTS idx_deleted_at ON memories(deleted_at)`,
 	}
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {

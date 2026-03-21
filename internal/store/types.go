@@ -32,6 +32,7 @@ type Memory struct {
 	SourceConv   string  `json:"source_conv,omitempty"`   // 来源对话 ID
 	ContentHash  string  `json:"content_hash,omitempty"`  // SHA256 前 16 位
 	Expired      bool    `json:"expired,omitempty"`       // 是否已过期
+	DeletedAt    int64   `json:"deleted_at,omitempty"`   // 软删除时间戳（0=正常）
 }
 
 // SearchResult 表示检索结果

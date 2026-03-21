@@ -62,6 +62,7 @@ type Memory struct {
     SourceConv   string  `json:"source_conv"`    // 来源对话 ID
     ContentHash  string  `json:"content_hash"`   // 内容 SHA256 前 16 位（数据库级去重）
     Expired      bool    `json:"expired"`        // 是否已过期（不可变 importance）
+    DeletedAt    int64   `json:"deleted_at"`     // 软删除时间戳（0=正常，>0=垃圾桶）
 }
 ```
 
@@ -108,9 +109,13 @@ CREATE INDEX IF NOT EXISTS idx_expires_at ON memories(expires_at);
 CREATE INDEX IF NOT EXISTS idx_source_conv ON memories(source_conv);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash_unique ON memories(content_hash)
     WHERE content_hash IS NOT NULL;
+
+-- 垃圾桶支持（见 §5.3.1）
+ALTER TABLE memories ADD COLUMN deleted_at INTEGER DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_deleted_at ON memories(deleted_at);
 ```
 
-> **向后兼容**：所有新字段有默认值。现有数据 memory_type='fact', confidence=0.5。
+> **向后兼容**：所有新字段有默认值。现有数据 memory_type='fact', confidence=0.5, deleted_at=0。
 
 ---
 
@@ -293,9 +298,20 @@ type ScoringConfig struct {
 | skill | 180 天 | 技能变化缓慢 |
 | episode | 30 天 | 事件时效性强 |
 
-### 5.3 主动遗忘（定期清理）
+### 5.3 主动遗忘（软删除 + 垃圾桶）
 
-每日运行或启动时执行（使用 Go 传入的 Unix 时间戳，避免 SQLite `CURRENT_TIMESTAMP` 字符串问题）：
+所有清理操作使用**软删除**而非硬删除，记忆先进入垃圾桶，用户可查看/恢复/永久删除。
+
+#### 5.3.1 数据模型变更
+
+迁移 SQL 已包含在 §2.4 中（`ALTER TABLE memories ADD COLUMN deleted_at INTEGER DEFAULT 0`）。
+
+- `deleted_at = 0` 表示正常记忆
+- `deleted_at > 0` 表示软删除时间戳（进入垃圾桶）
+
+#### 5.3.2 清理流程
+
+每日运行或启动时执行（使用 Go 传入的 Unix 时间戳）：
 
 ```go
 func (s *Store) RunCleanup(now int64) error {
@@ -303,25 +319,81 @@ func (s *Store) RunCleanup(now int64) error {
     s.db.Exec(`UPDATE memories SET expired = 1
         WHERE expires_at > 0 AND expires_at < ? AND expired = 0`, now)
 
-    // 2. 清理低价值记忆（重要性低 + 从未召回 + 超过180天 + 低置信度 + 不在覆盖链中）
+    // 2. 软删除低价值记忆（移入垃圾桶，而非直接删除）
     cutoff := now - 180*86400
-    s.db.Exec(`DELETE FROM memories
-        WHERE importance < 0.1 AND confidence < 0.1
+    s.db.Exec(`UPDATE memories SET deleted_at = ?
+        WHERE deleted_at = 0
+          AND importance < 0.1 AND confidence < 0.1
           AND access_count = 0 AND timestamp < ?
           AND id NOT IN (SELECT new_id FROM memory_supersessions)
-          AND id NOT IN (SELECT old_id FROM memory_supersessions)`, cutoff)
+          AND id NOT IN (SELECT old_id FROM memory_supersessions)`, now, cutoff)
 
-    // 3. 清理过期且超过 30 天的记忆
+    // 3. 软删除创建超过 30 天且已过期的记忆（timestamp 是创建时间）
     expiredCutoff := now - 30*86400
+    s.db.Exec(`UPDATE memories SET deleted_at = ?
+        WHERE deleted_at = 0 AND expired = 1 AND timestamp < ?`, now, expiredCutoff)
+
+    // 4. 永久删除垃圾桶中超过 30 天的记忆
+    trashCutoff := now - 30*86400
     s.db.Exec(`DELETE FROM memories
-        WHERE expired = 1 AND timestamp < ?`, expiredCutoff)
+        WHERE deleted_at > 0 AND deleted_at < ?`, trashCutoff)
 
     return nil
 }
 ```
 
-> **不删除被覆盖记忆**：`memory_supersessions` 中的旧记忆不主动删除，只在搜索时排除。
-> 检索 WHERE 条件：`WHERE expired = 0 AND id NOT IN (SELECT old_id FROM memory_supersessions)`
+#### 5.3.3 垃圾桶 API
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/memories/trash` | GET | 查看垃圾桶（分页，按 deleted_at DESC） |
+| `/api/memories/:id/restore` | POST | 从垃圾桶恢复（`SET deleted_at=0, expired=0`；保留原始 `expires_at`，若已过期则同时置 `expires_at=0`） |
+| `/api/memories/:id/soft-delete` | POST | 手动移入垃圾桶 |
+| `/api/memories/:id/permanent` | DELETE | 永久删除（不可恢复） |
+
+#### 5.3.4 Supersession 撤回
+
+用户可撤回错误的记忆替代：
+```go
+func (s *Store) UndoSupersession(oldID, newID string, now int64) error {
+    tx, _ := s.db.Begin()
+    defer tx.Rollback()
+
+    // 1. 删除 supersession 记录（验证存在性）
+    res, _ := tx.Exec(`DELETE FROM memory_supersessions WHERE old_id = ? AND new_id = ?`, oldID, newID)
+    rows, _ := res.RowsAffected()
+    if rows == 0 {
+        return fmt.Errorf("supersession (%s → %s) not found", oldID, newID)
+    }
+
+    // 2. 检查 oldID 是否还被其他记忆超替
+    var otherCount int
+    tx.QueryRow(`SELECT COUNT(*) FROM memory_supersessions WHERE old_id = ?`, oldID).Scan(&otherCount)
+
+    // 3. 仅当没有其他 supersession 时才恢复 importance
+    if otherCount == 0 {
+        tx.Exec(`UPDATE memories SET importance = MIN(1.0, importance / 0.3) WHERE id = ?`, oldID)
+    }
+
+    // 4. 将新记忆移入垃圾桶
+    tx.Exec(`UPDATE memories SET deleted_at = ? WHERE id = ?`, now, newID)
+
+    return tx.Commit()
+}
+```
+
+> **幂等性**：通过事务 + RowsAffected 检查确保重复调用不会造成 importance 漂移或误删。
+
+#### 5.3.5 搜索过滤
+
+所有搜索查询增加 `AND deleted_at = 0` 条件（使用 Go 传入的 `now` 参数，保持时间源一致）：
+```sql
+WHERE expired = 0 AND deleted_at = 0
+  AND (expires_at = 0 OR expires_at > ?)  -- ? = Go time.Now().Unix()
+  AND id NOT IN (SELECT old_id FROM memory_supersessions)
+```
+
+> **设计原则**：自动清理分两阶段——先软删除（进入垃圾桶），30 天后才永久删除。用户在 30 天窗口期内可查看和恢复。
 
 ---
 

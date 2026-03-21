@@ -92,6 +92,7 @@ type Store interface {
 	HasChildren(id string) (bool, error)
 	GetContent(id string) (string, error)
 	UpdateConfidence(id string, delta float64) error
+	UpdateImportance(id string, importance float64) error
 	RecordSupersession(oldID, newID string) error
 	SoftDelete(id string, now int64) error
 	Restore(id string) error
@@ -411,6 +412,14 @@ func (s *sqliteStore) UpdateConfidence(id string, delta float64) error {
 	_, err := s.db.Exec(`
 		UPDATE memories SET confidence = MIN(1.0, MAX(0.05, confidence + ?))
 		WHERE id = ?`, delta, id)
+	return err
+}
+
+// UpdateImportance sets the importance of a memory, clamped to [0, 1].
+func (s *sqliteStore) UpdateImportance(id string, importance float64) error {
+	if importance < 0 { importance = 0 }
+	if importance > 1 { importance = 1 }
+	_, err := s.db.Exec(`UPDATE memories SET importance = ? WHERE id = ?`, importance, id)
 	return err
 }
 

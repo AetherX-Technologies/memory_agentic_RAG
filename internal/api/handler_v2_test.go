@@ -64,8 +64,9 @@ func (m *mockStore) GetContent(id string) (string, error) {
 	return mem.Text, nil
 }
 func (m *mockStore) Close() error                                    { return nil }
-func (m *mockStore) UpdateConfidence(id string, delta float64) error  { return nil }
-func (m *mockStore) RecordSupersession(oldID, newID string) error     { return nil }
+func (m *mockStore) UpdateConfidence(id string, delta float64) error    { return nil }
+func (m *mockStore) UpdateImportance(id string, importance float64) error { return nil }
+func (m *mockStore) RecordSupersession(oldID, newID string) error      { return nil }
 func (m *mockStore) SoftDelete(id string, now int64) error            { return nil }
 func (m *mockStore) Restore(id string) error                          { return nil }
 func (m *mockStore) ListTrash(limit int) ([]*store.Memory, error)     { return nil, nil }

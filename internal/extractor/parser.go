@@ -32,7 +32,8 @@ func parseExtraction(raw string) ([]RawMemory, error) {
 		return memories, nil
 	}
 
-	// Attempt 2: extract [...] substrings and try each until one unmarshals
+	// Attempt 2: extract [...] substrings and try each until one unmarshals with content
+	foundEmpty := false
 	remaining := cleaned
 	for {
 		extracted := extractJSONArray(remaining)
@@ -43,8 +44,7 @@ func parseExtraction(raw string) ([]RawMemory, error) {
 			if len(memories) > 0 {
 				return memories, nil
 			}
-			// Valid empty array [] — treat as "no memories"
-			return nil, nil
+			foundEmpty = true // remember we saw a valid empty array
 		}
 		// Skip past this [...] and try the next one
 		idx := strings.Index(remaining, extracted)
@@ -52,6 +52,10 @@ func parseExtraction(raw string) ([]RawMemory, error) {
 			break
 		}
 		remaining = remaining[idx+len(extracted):]
+	}
+	// If we found at least one valid empty array and no non-empty one, treat as "no memories"
+	if foundEmpty {
+		return nil, nil
 	}
 
 	// Attempt 3: maybe it's a single object, not array

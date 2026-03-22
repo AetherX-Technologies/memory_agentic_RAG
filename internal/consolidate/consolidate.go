@@ -3,17 +3,15 @@
 package consolidate
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yourusername/hybridmem-rag/internal/llmutil"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 )
 
@@ -49,7 +47,6 @@ type Result struct {
 type Consolidator struct {
 	store  store.Store
 	config Config
-	client *http.Client
 }
 
 // New creates a new Consolidator.
@@ -62,7 +59,6 @@ func New(s store.Store, cfg Config) *Consolidator {
 	return &Consolidator{
 		store:  s,
 		config: cfg,
-		client: &http.Client{Timeout: time.Duration(cfg.LLMTimeout) * time.Second},
 	}
 }
 
@@ -151,42 +147,17 @@ func (c *Consolidator) callLLM(ctx context.Context, memoriesText string) (*Resul
 	}
 
 	prompt := fmt.Sprintf(consolidatePrompt, memoriesText)
-	reqBody := map[string]interface{}{
-		"model": c.config.LLMModel,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-		"max_tokens":  1024,
-		"temperature": 0.2,
+	cfg := llmutil.Config{
+		APIKey:   c.config.LLMAPIKey,
+		Model:    c.config.LLMModel,
+		Endpoint: c.config.LLMEndpoint,
+		Timeout:  c.config.LLMTimeout,
 	}
-
-	body, _ := json.Marshal(reqBody)
-	req, err := http.NewRequestWithContext(ctx, "POST", c.config.LLMEndpoint, bytes.NewReader(body))
-	if err != nil { return nil, err }
-	req.Header.Set("Authorization", "Bearer "+c.config.LLMAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err != nil { return nil, err }
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("LLM API error %d: %s", resp.StatusCode, string(b))
+	raw, err := llmutil.CallLLM(ctx, cfg, prompt, 1024, 0.2)
+	if err != nil {
+		return nil, err
 	}
-
-	data, _ := io.ReadAll(resp.Body)
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(data, &apiResp); err != nil { return nil, err }
-	if len(apiResp.Choices) == 0 { return nil, fmt.Errorf("no choices") }
-
-	return parseResult(apiResp.Choices[0].Message.Content)
+	return parseResult(raw)
 }
 
 func parseResult(raw string) (*Result, error) {

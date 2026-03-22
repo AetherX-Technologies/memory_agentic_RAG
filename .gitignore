@@ -17,6 +17,7 @@ models/
 /accuracy_benchmark
 /memory_integration_test
 /full_memory_test
+/hybridmem-mcp
 
 # Build artifacts
 simple/build/

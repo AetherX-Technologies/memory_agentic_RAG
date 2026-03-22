@@ -8,11 +8,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
+
+	"github.com/yourusername/hybridmem-rag/internal/llmutil"
 )
 
 // Config holds configuration for the memory extractor.
@@ -63,7 +62,6 @@ type Message struct {
 // Extractor extracts memories from conversations using an LLM with fallback.
 type Extractor struct {
 	config Config
-	client *http.Client
 }
 
 // New creates a new Extractor. If APIKey is empty, only fallback extraction is available.
@@ -83,7 +81,6 @@ func New(config Config) *Extractor {
 
 	return &Extractor{
 		config: config,
-		client: &http.Client{Timeout: time.Duration(config.Timeout) * time.Second},
 	}
 }
 
@@ -170,60 +167,15 @@ func (e *Extractor) extractWithLLM(ctx context.Context, messages []Message) ([]R
 	return nil, fmt.Errorf("extraction failed after %d attempts: %w", e.config.MaxRetries+1, lastErr)
 }
 
-// callLLM makes a single OpenAI-compatible chat completion request.
+// callLLM makes an OpenAI-compatible chat completion request (with SSE streaming support).
 func (e *Extractor) callLLM(ctx context.Context, prompt string) (string, error) {
-	reqBody := map[string]interface{}{
-		"model": e.config.Model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-		"max_tokens":  1024,
-		"temperature": 0.2,
+	cfg := llmutil.Config{
+		APIKey:   e.config.APIKey,
+		Model:    e.config.Model,
+		Endpoint: e.config.Endpoint,
+		Timeout:  e.config.Timeout,
 	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", e.config.Endpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+e.config.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("LLM request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("LLM API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(data, &apiResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-	if len(apiResp.Choices) == 0 {
-		return "", fmt.Errorf("LLM returned no choices")
-	}
-
-	return apiResp.Choices[0].Message.Content, nil
+	return llmutil.CallLLM(ctx, cfg, prompt, 1024, 0.2)
 }
 
 // formatConversation formats messages into a readable string for the prompt.

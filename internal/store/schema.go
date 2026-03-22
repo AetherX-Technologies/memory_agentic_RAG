@@ -174,6 +174,8 @@ var memorySystemColumns = []struct {
 	{"content_hash", "TEXT DEFAULT NULL"},
 	{"expired", "INTEGER DEFAULT 0"},
 	{"deleted_at", "INTEGER DEFAULT 0"},
+	{"consolidated", "INTEGER DEFAULT 0"},
+	{"connections", "TEXT DEFAULT '[]'"},
 }
 
 // migrateMemorySystem adds AI memory system columns and tables (idempotent).
@@ -202,6 +204,7 @@ func migrateMemorySystem(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_expires_at ON memories(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_source_conv ON memories(source_conv)`,
 		`CREATE INDEX IF NOT EXISTS idx_deleted_at ON memories(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_consolidated ON memories(consolidated)`,
 	}
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {
@@ -232,6 +235,16 @@ func migrateMemorySystem(db *sql.DB) error {
 			FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_tag ON memory_tags(tag)`,
+		`CREATE TABLE IF NOT EXISTS consolidations (
+			id TEXT PRIMARY KEY,
+			source_ids TEXT NOT NULL DEFAULT '[]',
+			summary TEXT NOT NULL DEFAULT '',
+			insight TEXT NOT NULL DEFAULT '',
+			patterns TEXT NOT NULL DEFAULT '[]',
+			connections TEXT NOT NULL DEFAULT '[]',
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_consolidation_created ON consolidations(created_at DESC)`,
 	}
 	for _, ddl := range tables {
 		if _, err := db.Exec(ddl); err != nil {

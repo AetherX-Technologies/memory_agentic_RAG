@@ -36,6 +36,12 @@ func (m *minimalMockStore) Restore(id string) error                             
 func (m *minimalMockStore) ListTrash(limit int) ([]*store.Memory, error)          { return nil, nil }
 func (m *minimalMockStore) PermanentDelete(id string) error                       { return nil }
 func (m *minimalMockStore) RunCleanup(now int64) error                            { return nil }
-func (m *minimalMockStore) SetTags(memoryID string, tags []string) error          { return nil }
-func (m *minimalMockStore) GetMemoryIDsByTag(tag string) ([]string, error)        { return nil, nil }
-func (m *minimalMockStore) Close() error                                          { return nil }
+func (m *minimalMockStore) SetTags(memoryID string, tags []string) error                   { return nil }
+func (m *minimalMockStore) GetMemoryIDsByTag(tag string) ([]string, error)                 { return nil, nil }
+func (m *minimalMockStore) ListUnconsolidated(limit int) ([]*store.Memory, error)          { return nil, nil }
+func (m *minimalMockStore) CountUnconsolidated() (int64, error)                            { return 0, nil }
+func (m *minimalMockStore) MarkConsolidated(ids []string) error                            { return nil }
+func (m *minimalMockStore) CreateConsolidation(c *store.Consolidation) (string, error)     { return "c1", nil }
+func (m *minimalMockStore) ListConsolidations(limit int) ([]*store.Consolidation, error)   { return nil, nil }
+func (m *minimalMockStore) AddConnection(memoryID, linkedTo, relationship string) error    { return nil }
+func (m *minimalMockStore) Close() error                                                   { return nil }

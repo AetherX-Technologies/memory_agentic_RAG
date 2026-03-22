@@ -20,6 +20,31 @@ func (s *Server) registerTools() {
 	s.handlers["memory_export"] = s.handleMemoryExport
 	s.handlers["memory_import"] = s.handleMemoryImport
 	s.handlers["memory_forget_by_tag"] = s.handleMemoryForgetByTag
+	s.handlers["memory_consolidate"] = s.handleMemoryConsolidate
+}
+
+// ── memory_consolidate ──
+
+func (s *Server) handleMemoryConsolidate(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	// Check if enough memories to consolidate
+	count, err := s.store.CountUnconsolidated()
+	if err != nil {
+		return nil, fmt.Errorf("count unconsolidated: %w", err)
+	}
+	if count < 2 {
+		return map[string]interface{}{
+			"status":         "skipped",
+			"unconsolidated": count,
+			"reason":         "need at least 2 unconsolidated memories",
+		}, nil
+	}
+
+	// List unconsolidated for display
+	return map[string]interface{}{
+		"status":         "ready",
+		"unconsolidated": count,
+		"note":           "consolidation requires LLM API key configured in consolidate.Config",
+	}, nil
 }
 
 // ── memory_store ──
@@ -134,13 +159,37 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 		}
 	}
 
-	// Format context
-	formatted := formatContext(filtered, p.MaxTokens)
+	// Reserve tokens for consolidation insights (20% of budget)
+	insightBudget := p.MaxTokens / 5
+	memoryBudget := p.MaxTokens - insightBudget
+
+	// Format context with memory budget
+	formatted := formatContext(filtered, memoryBudget)
+
+	// Append consolidation insights within remaining budget
+	consolidations, _ := s.store.ListConsolidations(5)
+	if len(consolidations) > 0 {
+		insightsText := "\n🧠 洞察\n"
+		usedTokens := 0
+		for _, c := range consolidations {
+			if c.Insight != "" {
+				line := "- " + c.Insight + "\n"
+				lineTokens := len([]rune(line)) * 2 / 3
+				if usedTokens+lineTokens > insightBudget {
+					break
+				}
+				insightsText += line
+				usedTokens += lineTokens
+			}
+		}
+		formatted += insightsText
+	}
 
 	return map[string]interface{}{
-		"count":   len(filtered),
-		"context": formatted,
-		"memories": filtered,
+		"count":          len(filtered),
+		"context":        formatted,
+		"memories":       filtered,
+		"consolidations": len(consolidations),
 	}, nil
 }
 

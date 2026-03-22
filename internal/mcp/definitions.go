@@ -91,4 +91,12 @@ var toolDefinitions = []map[string]interface{}{
 			"required": []string{"tag"},
 		},
 	},
+	{
+		"name":        "memory_consolidate",
+		"description": "检查是否有足够的未合并记忆可供合并分析。实际合并需要配置 LLM API key 并通过 Consolidator 执行。",
+		"inputSchema": map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	},
 }

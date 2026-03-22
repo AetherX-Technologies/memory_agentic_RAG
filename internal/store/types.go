@@ -33,6 +33,19 @@ type Memory struct {
 	ContentHash  string  `json:"content_hash,omitempty"`  // SHA256 前 16 位
 	Expired      bool    `json:"expired,omitempty"`       // 是否已过期
 	DeletedAt    int64   `json:"deleted_at,omitempty"`   // 软删除时间戳（0=正常）
+	Consolidated bool    `json:"consolidated,omitempty"` // 是否已参与合并
+	Connections  string  `json:"connections,omitempty"`  // JSON: [{linked_to, relationship}]
+}
+
+// Consolidation 表示一次记忆合并结果
+type Consolidation struct {
+	ID          string `json:"id"`
+	SourceIDs   string `json:"source_ids"`   // JSON array of memory IDs
+	Summary     string `json:"summary"`
+	Insight     string `json:"insight"`
+	Patterns    string `json:"patterns"`     // JSON array
+	ConnectionsJSON string `json:"connections"`  // JSON array of {from_id, to_id, relationship}
+	CreatedAt   int64  `json:"created_at"`
 }
 
 // SearchResult 表示检索结果

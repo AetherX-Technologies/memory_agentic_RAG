@@ -72,8 +72,14 @@ func (m *mockStore) Restore(id string) error                          { return n
 func (m *mockStore) ListTrash(limit int) ([]*store.Memory, error)     { return nil, nil }
 func (m *mockStore) PermanentDelete(id string) error                  { return nil }
 func (m *mockStore) RunCleanup(now int64) error                                 { return nil }
-func (m *mockStore) SetTags(memoryID string, tags []string) error               { return nil }
-func (m *mockStore) GetMemoryIDsByTag(tag string) ([]string, error)             { return nil, nil }
+func (m *mockStore) SetTags(memoryID string, tags []string) error                    { return nil }
+func (m *mockStore) GetMemoryIDsByTag(tag string) ([]string, error)                  { return nil, nil }
+func (m *mockStore) ListUnconsolidated(limit int) ([]*store.Memory, error)           { return nil, nil }
+func (m *mockStore) CountUnconsolidated() (int64, error)                             { return 0, nil }
+func (m *mockStore) MarkConsolidated(ids []string) error                             { return nil }
+func (m *mockStore) CreateConsolidation(c *store.Consolidation) (string, error)      { return "c1", nil }
+func (m *mockStore) ListConsolidations(limit int) ([]*store.Consolidation, error)    { return nil, nil }
+func (m *mockStore) AddConnection(memoryID, linkedTo, relationship string) error     { return nil }
 
 // --- Tests ---
 

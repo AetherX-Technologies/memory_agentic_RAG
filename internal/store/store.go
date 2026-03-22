@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -101,6 +102,13 @@ type Store interface {
 	RunCleanup(now int64) error
 	SetTags(memoryID string, tags []string) error
 	GetMemoryIDsByTag(tag string) ([]string, error)
+	// Phase G: Consolidation
+	ListUnconsolidated(limit int) ([]*Memory, error)
+	CountUnconsolidated() (int64, error)
+	MarkConsolidated(ids []string) error
+	CreateConsolidation(c *Consolidation) (string, error)
+	ListConsolidations(limit int) ([]*Consolidation, error)
+	AddConnection(memoryID, linkedTo, relationship string) error
 	Close() error
 }
 
@@ -578,6 +586,95 @@ func (s *sqliteStore) GetMemoryIDsByTag(tag string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ListUnconsolidated returns memories not yet consolidated (category=memory, not deleted).
+func (s *sqliteStore) ListUnconsolidated(limit int) ([]*Memory, error) {
+	if limit <= 0 { limit = 50 }
+	rows, err := s.db.Query(`SELECT id, text, memory_type, importance, confidence, timestamp
+		FROM memories WHERE consolidated = 0 AND deleted_at = 0 AND category = 'memory'
+		ORDER BY timestamp DESC LIMIT ?`, limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var result []*Memory
+	for rows.Next() {
+		m := &Memory{}
+		if err := rows.Scan(&m.ID, &m.Text, &m.MemoryType, &m.Importance, &m.Confidence, &m.Timestamp); err != nil {
+			return nil, err
+		}
+		result = append(result, m)
+	}
+	return result, rows.Err()
+}
+
+// CountUnconsolidated returns the number of unconsolidated memories.
+func (s *sqliteStore) CountUnconsolidated() (int64, error) {
+	var count int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE consolidated = 0 AND deleted_at = 0 AND category = 'memory'`).Scan(&count)
+	return count, err
+}
+
+// MarkConsolidated marks memories as consolidated.
+func (s *sqliteStore) MarkConsolidated(ids []string) error {
+	tx, err := s.db.Begin()
+	if err != nil { return err }
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec(`UPDATE memories SET consolidated = 1 WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// CreateConsolidation stores a consolidation result.
+func (s *sqliteStore) CreateConsolidation(c *Consolidation) (string, error) {
+	if c.ID == "" {
+		c.ID = uuid.New().String()
+	}
+	if c.CreatedAt == 0 {
+		c.CreatedAt = time.Now().Unix()
+	}
+	_, err := s.db.Exec(`INSERT INTO consolidations (id, source_ids, summary, insight, patterns, connections, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.SourceIDs, c.Summary, c.Insight, c.Patterns, c.ConnectionsJSON, c.CreatedAt)
+	return c.ID, err
+}
+
+// ListConsolidations returns recent consolidations.
+func (s *sqliteStore) ListConsolidations(limit int) ([]*Consolidation, error) {
+	if limit <= 0 { limit = 10 }
+	rows, err := s.db.Query(`SELECT id, source_ids, summary, insight, patterns, connections, created_at
+		FROM consolidations ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var result []*Consolidation
+	for rows.Next() {
+		c := &Consolidation{}
+		if err := rows.Scan(&c.ID, &c.SourceIDs, &c.Summary, &c.Insight, &c.Patterns, &c.ConnectionsJSON, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
+// AddConnection adds a connection to a memory (safe JSON encoding).
+func (s *sqliteStore) AddConnection(memoryID, linkedTo, relationship string) error {
+	var connJSON string
+	err := s.db.QueryRow(`SELECT connections FROM memories WHERE id = ?`, memoryID).Scan(&connJSON)
+	if err != nil { return err }
+	if connJSON == "" { connJSON = "[]" }
+
+	var conns []map[string]string
+	json.Unmarshal([]byte(connJSON), &conns)
+	conns = append(conns, map[string]string{
+		"linked_to":    linkedTo,
+		"relationship": relationship,
+	})
+	updated, _ := json.Marshal(conns)
+	_, err = s.db.Exec(`UPDATE memories SET connections = ? WHERE id = ?`, string(updated), memoryID)
+	return err
 }
 
 // scanMemoriesWithVector scans rows from a query that includes a trailing v.vector column (nullable).

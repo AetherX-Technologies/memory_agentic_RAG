@@ -50,9 +50,14 @@ func (s *Scheduler) Start() {
 	}()
 }
 
-// Stop stops the scheduler.
+// Stop stops the scheduler. Safe to call multiple times.
 func (s *Scheduler) Stop() {
-	close(s.stopCh)
+	select {
+	case <-s.stopCh:
+		// already closed
+	default:
+		close(s.stopCh)
+	}
 }
 
 func (s *Scheduler) run() {

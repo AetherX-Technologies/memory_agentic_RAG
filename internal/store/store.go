@@ -592,7 +592,7 @@ func (s *sqliteStore) GetMemoryIDsByTag(tag string) ([]string, error) {
 func (s *sqliteStore) ListUnconsolidated(limit int) ([]*Memory, error) {
 	if limit <= 0 { limit = 50 }
 	rows, err := s.db.Query(`SELECT id, text, memory_type, importance, confidence, timestamp
-		FROM memories WHERE consolidated = 0 AND deleted_at = 0 AND category = 'memory'
+		FROM memories WHERE consolidated = 0 AND deleted_at = 0 AND expired = 0 AND category = 'memory'
 		ORDER BY timestamp DESC LIMIT ?`, limit)
 	if err != nil { return nil, err }
 	defer rows.Close()
@@ -610,7 +610,7 @@ func (s *sqliteStore) ListUnconsolidated(limit int) ([]*Memory, error) {
 // CountUnconsolidated returns the number of unconsolidated memories.
 func (s *sqliteStore) CountUnconsolidated() (int64, error) {
 	var count int64
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE consolidated = 0 AND deleted_at = 0 AND category = 'memory'`).Scan(&count)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE consolidated = 0 AND deleted_at = 0 AND expired = 0 AND category = 'memory'`).Scan(&count)
 	return count, err
 }
 

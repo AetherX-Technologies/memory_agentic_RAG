@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -131,8 +132,10 @@ func (c *Consolidator) Consolidate(ctx context.Context) (*store.Consolidation, e
 			}
 		}
 	}
-	// Log connection errors but don't fail consolidation
-	_ = connErrors // logged by caller if needed
+	// Log connection errors (don't fail consolidation for partial graph issues)
+	if len(connErrors) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: %d connection update errors during consolidation\n", len(connErrors))
+	}
 
 	// Mark source memories as consolidated
 	if err := c.store.MarkConsolidated(sourceIDs); err != nil {

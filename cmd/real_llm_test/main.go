@@ -148,7 +148,7 @@ func main() {
 			LLMAPIKey:   apiKey,
 			LLMModel:    apiModel,
 			LLMEndpoint: apiEndpoint,
-			LLMTimeout:  60,
+			LLMTimeout:  120,
 			MaxMemories: 50,
 		})
 

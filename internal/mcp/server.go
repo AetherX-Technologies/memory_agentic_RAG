@@ -12,16 +12,18 @@ import (
 	"os"
 	"sync"
 
+	"github.com/yourusername/hybridmem-rag/internal/consolidate"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 )
 
 // Server is the MCP server that handles JSON-RPC requests over stdio.
 type Server struct {
-	store    store.Store
-	embedder store.Embedder
-	handlers map[string]ToolHandler
-	config   Config
-	mu       sync.Mutex
+	store        store.Store
+	embedder     store.Embedder
+	consolidator *consolidate.Consolidator // nil if LLM not configured
+	handlers     map[string]ToolHandler
+	config       Config
+	mu           sync.Mutex
 }
 
 // ToolHandler processes a tool call and returns the result content.
@@ -41,13 +43,16 @@ func DefaultConfig() Config {
 	}
 }
 
-// New creates a new MCP server.
-func New(s store.Store, embedder store.Embedder, cfg Config) *Server {
+// New creates a new MCP server. Consolidator is optional (nil if LLM not configured).
+func New(s store.Store, embedder store.Embedder, cfg Config, cons ...*consolidate.Consolidator) *Server {
 	srv := &Server{
 		store:    s,
 		embedder: embedder,
 		handlers: make(map[string]ToolHandler),
 		config:   cfg,
+	}
+	if len(cons) > 0 {
+		srv.consolidator = cons[0]
 	}
 	srv.registerTools()
 	return srv

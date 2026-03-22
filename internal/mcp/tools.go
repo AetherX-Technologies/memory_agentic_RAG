@@ -26,7 +26,6 @@ func (s *Server) registerTools() {
 // ── memory_consolidate ──
 
 func (s *Server) handleMemoryConsolidate(ctx context.Context, params json.RawMessage) (interface{}, error) {
-	// Check if enough memories to consolidate
 	count, err := s.store.CountUnconsolidated()
 	if err != nil {
 		return nil, fmt.Errorf("count unconsolidated: %w", err)
@@ -39,11 +38,31 @@ func (s *Server) handleMemoryConsolidate(ctx context.Context, params json.RawMes
 		}, nil
 	}
 
-	// List unconsolidated for display
+	// If no consolidator configured, report status only
+	if s.consolidator == nil {
+		return map[string]interface{}{
+			"status":         "unavailable",
+			"unconsolidated": count,
+			"reason":         "LLM not configured — set LLM API key to enable consolidation",
+		}, nil
+	}
+
+	// Execute consolidation
+	result, err := s.consolidator.Consolidate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("consolidation failed: %w", err)
+	}
+	if result == nil {
+		return map[string]interface{}{"status": "skipped", "reason": "insufficient memories"}, nil
+	}
+
+	newCount, _ := s.store.CountUnconsolidated()
 	return map[string]interface{}{
-		"status":         "ready",
-		"unconsolidated": count,
-		"note":           "consolidation requires LLM API key configured in consolidate.Config",
+		"status":         "completed",
+		"insight":        result.Insight,
+		"summary":        result.Summary,
+		"consolidated":   count - newCount,
+		"unconsolidated": newCount,
 	}, nil
 }
 

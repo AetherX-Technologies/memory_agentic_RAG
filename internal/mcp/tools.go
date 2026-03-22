@@ -371,7 +371,7 @@ func (s *Server) handleMemoryImport(ctx context.Context, params json.RawMessage)
 func (s *Server) handleMemoryForgetByTag(ctx context.Context, params json.RawMessage) (interface{}, error) {
 	var p struct {
 		Tag    string `json:"tag"`
-		DryRun bool   `json:"dry_run"`
+		DryRun *bool  `json:"dry_run"` // pointer to detect omission; defaults to true
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -379,15 +379,43 @@ func (s *Server) handleMemoryForgetByTag(ctx context.Context, params json.RawMes
 	if p.Tag == "" {
 		return nil, fmt.Errorf("tag is required")
 	}
+	// Default dry_run to true when omitted (matches schema default)
+	isDryRun := true
+	if p.DryRun != nil {
+		isDryRun = *p.DryRun
+	}
 
-	// For now, tag-based operations are not yet wired to memory_tags table.
-	// This is a placeholder that will be connected when tags are stored during extraction.
-	return map[string]interface{}{
+	ids, err := s.store.GetMemoryIDsByTag(p.Tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tag: %w", err)
+	}
+
+	if isDryRun {
+		return map[string]interface{}{
+			"tag":     p.Tag,
+			"dry_run": true,
+			"count":   len(ids),
+		}, nil
+	}
+
+	deleted, failed := 0, 0
+	now := time.Now().Unix()
+	for _, id := range ids {
+		if err := s.store.SoftDelete(id, now); err != nil {
+			failed++
+		} else {
+			deleted++
+		}
+	}
+
+	result := map[string]interface{}{
 		"tag":     p.Tag,
-		"dry_run": p.DryRun,
-		"count":   0,
-		"note":    "tag-based deletion requires memory_tags integration (Phase F)",
-	}, nil
+		"deleted": deleted,
+	}
+	if failed > 0 {
+		result["failed"] = failed
+	}
+	return result, nil
 }
 
 // ── helpers ──

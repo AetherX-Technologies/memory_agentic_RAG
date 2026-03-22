@@ -36,4 +36,6 @@ func (m *minimalMockStore) Restore(id string) error                             
 func (m *minimalMockStore) ListTrash(limit int) ([]*store.Memory, error)          { return nil, nil }
 func (m *minimalMockStore) PermanentDelete(id string) error                       { return nil }
 func (m *minimalMockStore) RunCleanup(now int64) error                            { return nil }
+func (m *minimalMockStore) SetTags(memoryID string, tags []string) error          { return nil }
+func (m *minimalMockStore) GetMemoryIDsByTag(tag string) ([]string, error)        { return nil, nil }
 func (m *minimalMockStore) Close() error                                          { return nil }

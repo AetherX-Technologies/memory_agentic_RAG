@@ -99,6 +99,8 @@ type Store interface {
 	ListTrash(limit int) ([]*Memory, error)
 	PermanentDelete(id string) error
 	RunCleanup(now int64) error
+	SetTags(memoryID string, tags []string) error
+	GetMemoryIDsByTag(tag string) ([]string, error)
 	Close() error
 }
 
@@ -534,6 +536,48 @@ func (s *sqliteStore) RunCleanup(now int64) error {
 	}
 
 	return nil
+}
+
+// SetTags replaces all tags for a memory.
+func (s *sqliteStore) SetTags(memoryID string, tags []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM memory_tags WHERE memory_id = ?`, memoryID); err != nil {
+		return err
+	}
+	for _, tag := range tags {
+		if tag != "" {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?, ?)`, memoryID, tag); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// GetMemoryIDsByTag returns memory IDs that have the given tag.
+func (s *sqliteStore) GetMemoryIDsByTag(tag string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT t.memory_id FROM memory_tags t
+		JOIN memories m ON t.memory_id = m.id
+		WHERE t.tag = ? AND m.deleted_at = 0`, tag)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // scanMemoriesWithVector scans rows from a query that includes a trailing v.vector column (nullable).

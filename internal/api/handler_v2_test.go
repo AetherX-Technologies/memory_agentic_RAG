@@ -71,7 +71,9 @@ func (m *mockStore) SoftDelete(id string, now int64) error            { return n
 func (m *mockStore) Restore(id string) error                          { return nil }
 func (m *mockStore) ListTrash(limit int) ([]*store.Memory, error)     { return nil, nil }
 func (m *mockStore) PermanentDelete(id string) error                  { return nil }
-func (m *mockStore) RunCleanup(now int64) error                       { return nil }
+func (m *mockStore) RunCleanup(now int64) error                                 { return nil }
+func (m *mockStore) SetTags(memoryID string, tags []string) error               { return nil }
+func (m *mockStore) GetMemoryIDsByTag(tag string) ([]string, error)             { return nil, nil }
 
 // --- Tests ---
 

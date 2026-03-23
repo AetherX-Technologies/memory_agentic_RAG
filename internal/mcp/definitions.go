@@ -65,6 +65,7 @@ var toolDefinitions = []map[string]interface{}{
 				"types":           map[string]interface{}{"type": "array", "items": map[string]string{"type": "string"}},
 				"include_expired": map[string]interface{}{"type": "boolean", "default": false},
 			},
+			"required": []string{},
 		},
 	},
 	{
@@ -97,6 +98,7 @@ var toolDefinitions = []map[string]interface{}{
 		"inputSchema": map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
+			"required":   []string{},
 		},
 	},
 	{

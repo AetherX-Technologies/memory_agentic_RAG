@@ -353,9 +353,10 @@ func (s *Server) handleToolsCall(ctx context.Context, req *JSONRPCRequest) *JSON
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: map[string]interface{}{
-			"content": []map[string]string{
+			"content": []map[string]interface{}{
 				{"type": "text", "text": string(text)},
 			},
+			"isError": false,
 		},
 	}
 }

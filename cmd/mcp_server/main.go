@@ -132,6 +132,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[memory] LLM: disabled (no consolidation)\n")
 	}
 
+	// Debug log to file (stderr may be discarded by MCP hosts)
+	logFile, _ := os.OpenFile("/tmp/hybridmem-mcp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if logFile != nil {
+		os.Stderr = logFile
+	}
+
 	srv := mcp.New(st, embedder, mcp.DefaultConfig(), cons)
 	fmt.Fprintf(os.Stderr, "[memory] server ready (db=%s)\n", dbPath)
 

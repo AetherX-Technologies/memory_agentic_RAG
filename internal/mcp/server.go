@@ -113,6 +113,8 @@ func (s *Server) Run(ctx context.Context) error {
 			continue
 		}
 
+		fmt.Fprintf(os.Stderr, "[mcp] recv %d bytes: %.80s\n", len(body), string(body))
+
 		var req JSONRPCRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			s.writeContentLength(os.Stdout, &JSONRPCResponse{
@@ -124,8 +126,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 		resp := s.handleRequest(ctx, &req)
 		if resp != nil {
-			// Always respond with Content-Length framing.
-			// Chatbox SDK sends newline-JSON but expects Content-Length responses.
+			respBytes, _ := json.Marshal(resp)
+			fmt.Fprintf(os.Stderr, "[mcp] send %d bytes for method=%s id=%v\n", len(respBytes), req.Method, req.ID)
 			s.writeContentLength(os.Stdout, resp)
 		}
 	}
@@ -264,11 +266,24 @@ func (s *Server) handleRequest(ctx context.Context, req *JSONRPCRequest) *JSONRP
 }
 
 func (s *Server) handleInitialize(req *JSONRPCRequest) *JSONRPCResponse {
+	// Echo back the client's protocolVersion for compatibility.
+	// MCP spec: server should return the highest version it supports
+	// that is also supported by the client.
+	clientVersion := "2024-11-05"
+	if req.Params != nil {
+		var params struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err == nil && params.ProtocolVersion != "" {
+			clientVersion = params.ProtocolVersion
+		}
+	}
+
 	return &JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: map[string]interface{}{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": clientVersion,
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
 			},

@@ -95,6 +95,15 @@ func (s *Server) Run(ctx context.Context) error {
 			if err == io.EOF {
 				return nil
 			}
+			// Fatal frame errors (e.g. oversized Content-Length) terminate the session
+			// because the stream is desynchronized and cannot be recovered.
+			if _, fatal := err.(*fatalFrameError); fatal {
+				s.writeContentLength(os.Stdout, &JSONRPCResponse{
+					JSONRPC: "2.0",
+					Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
+				})
+				return err
+			}
 			// Non-fatal read errors: send JSON-RPC error and continue
 			if useLegacy {
 				s.writeLineJSON(os.Stdout, &JSONRPCResponse{
@@ -140,6 +149,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 const maxContentLength = 64 * 1024 * 1024 // 64MB cap, same as legacy scanner
 
+// fatalFrameError indicates the stdio stream is unrecoverable (e.g. oversized frame).
+type fatalFrameError struct{ msg string }
+
+func (e *fatalFrameError) Error() string { return e.msg }
+
 // readContentLengthMessage reads a message framed with Content-Length header.
 func readContentLengthMessage(reader *bufio.Reader) ([]byte, error) {
 	// Read headers until empty line
@@ -166,10 +180,7 @@ func readContentLengthMessage(reader *bufio.Reader) ([]byte, error) {
 		return nil, nil
 	}
 	if contentLength > maxContentLength {
-		// Cannot safely drain a huge body (client may not send all bytes, causing a hang).
-		// Return error immediately; the stream may be desynchronized, but the JSON-RPC
-		// error will reach the client for the next read, and the client should reconnect.
-		return nil, fmt.Errorf("Content-Length %d exceeds max %d", contentLength, maxContentLength)
+		return nil, &fatalFrameError{msg: fmt.Sprintf("Content-Length %d exceeds max %d", contentLength, maxContentLength)}
 	}
 	body := make([]byte, contentLength)
 	_, err := io.ReadFull(reader, body)

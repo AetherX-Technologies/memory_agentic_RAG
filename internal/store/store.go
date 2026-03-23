@@ -189,18 +189,6 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Rebuild FTS index from existing memories with CJK segmentation
-	rows, err := db.Query("SELECT id, text FROM memories WHERE deleted_at = 0 AND expired = 0")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var id, text string
-			if err := rows.Scan(&id, &text); err == nil {
-				db.Exec("INSERT OR IGNORE INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
-			}
-		}
-	}
-
 	// 执行层次字段迁移
 	if err := migrateHierarchy(db); err != nil {
 		return fmt.Errorf("failed to migrate hierarchy: %w", err)
@@ -214,6 +202,19 @@ func initSchema(db *sql.DB) error {
 	// 执行 AI 记忆系统字段迁移
 	if err := migrateMemorySystem(db); err != nil {
 		return fmt.Errorf("failed to migrate memory system: %w", err)
+	}
+
+	// Rebuild FTS index from ALL memories (including trashed) with CJK segmentation.
+	// Must run after migrations so deleted_at/expired columns exist.
+	rows, err := db.Query("SELECT id, text FROM memories")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id, text string
+			if err := rows.Scan(&id, &text); err == nil {
+				db.Exec("INSERT OR IGNORE INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
+			}
+		}
 	}
 
 	return nil
@@ -322,7 +323,9 @@ func isCJKCharStore(r rune) bool {
 		(r >= 0x3400 && r <= 0x4DBF) || // Extension A
 		(r >= 0x20000 && r <= 0x2A6DF) || // Extension B
 		(r >= 0xF900 && r <= 0xFAFF) || // Compatibility
-		(r >= 0x3000 && r <= 0x303F) // Symbols
+		(r >= 0x3000 && r <= 0x303F) || // CJK Symbols
+		(r >= 0x3040 && r <= 0x309F) || // Hiragana
+		(r >= 0x30A0 && r <= 0x30FF) // Katakana
 }
 
 func (s *sqliteStore) Get(id string) (*Memory, error) {

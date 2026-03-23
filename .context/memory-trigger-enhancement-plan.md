@@ -160,8 +160,8 @@ var skipPatterns = []*regexp.Regexp{
     regexp.MustCompile(`(?i)^(yes|no|yep|nope|ok|okay|sure|fine|好的|是的|不是|继续|嗯)\s*[.!]?$`),
     // 操作指令
     regexp.MustCompile(`(?i)^(go ahead|continue|proceed|do it|start|begin|next|实施|开始|继续)\s*[.!]?$`),
-    // 纯 emoji
-    regexp.MustCompile(`^[\p{Emoji}\s]+$`),
+    // 纯 emoji（Go regexp 不支持 \p{Emoji}，用 Unicode 范围近似）
+    regexp.MustCompile(`^[\x{1F300}-\x{1F9FF}\x{2600}-\x{27BF}\x{FE00}-\x{FE0F}\x{200D}\s]+$`),
     // 斜杠命令
     regexp.MustCompile(`^/`),
     // 纯代码块
@@ -190,19 +190,20 @@ var forceRetrievePatterns = []*regexp.Regexp{
 func ShouldRetrieve(text string) bool {
     cleaned := strings.TrimSpace(text)
 
-    // 1. 长度过滤
+    // 1. 强制检索（最高优先级，不受长度限制）
+    //    "你记得吗"(4字)、"remember?"(9字) 等短查询必须命中
+    for _, r := range forceRetrievePatterns {
+        if r.MatchString(cleaned) {
+            return true
+        }
+    }
+
+    // 2. 长度过滤（在强制检索之后，避免拦截合法短查询）
     runeLen := utf8.RuneCountInString(cleaned)
     if isCJK(cleaned) {
         if runeLen < 6 { return false }   // 中文至少6字
     } else {
         if runeLen < 15 { return false }  // 英文至少15字
-    }
-
-    // 2. 强制检索（最高优先级）
-    for _, r := range forceRetrievePatterns {
-        if r.MatchString(cleaned) {
-            return true
-        }
     }
 
     // 3. 跳过模式
@@ -331,29 +332,40 @@ func filterNoiseResults(results []SearchResult) []SearchResult {
 ```go
 // internal/store/mmr.go
 
-// MMRRerank 应用最大边际相关性，降权相似结果
+// MMRRerank 应用最大边际相关性，降权相似结果。
+// 注意：BM25Search 不填充 Memory.Vector，调用前需为无向量结果补充嵌入。
+// 若向量为空，该条目不参与相似度惩罚（maxSim 保持 0），确保 BM25 结果不被错误跳过。
 func MMRRerank(results []SearchResult, lambda float64, simThreshold float64) []SearchResult {
     if len(results) <= 1 { return results }
 
-    selected := []SearchResult{results[0]}
-    remaining := results[1:]
+    // 复制切片，避免修改调用方的底层数组
+    pool := make([]SearchResult, len(results))
+    copy(pool, results)
 
-    for len(remaining) > 0 && len(selected) < len(results) {
+    selected := []SearchResult{pool[0]}
+    remaining := pool[1:]
+
+    for len(remaining) > 0 && len(selected) < len(pool) {
         bestIdx := -1
         bestScore := -1.0
 
         for i, candidate := range remaining {
             // 计算与已选结果的最大相似度
+            // 若任一方向量为空，cosine 返回 0（不惩罚）
             maxSim := 0.0
-            for _, sel := range selected {
-                sim := cosineSimilarity(candidate.Entry.Vector, sel.Entry.Vector)
-                if sim > maxSim { maxSim = sim }
+            if len(candidate.Entry.Vector) > 0 {
+                for _, sel := range selected {
+                    if len(sel.Entry.Vector) > 0 {
+                        sim := cosineSimilarity(candidate.Entry.Vector, sel.Entry.Vector)
+                        if sim > maxSim { maxSim = sim }
+                    }
+                }
             }
 
             // MMR: lambda * relevance - (1-lambda) * similarity
             mmrScore := lambda*candidate.Score - (1-lambda)*maxSim
 
-            // 如果与已选太相似（>0.85），大幅降权
+            // 如果与已选太相似（>threshold），大幅降权
             if maxSim > simThreshold {
                 mmrScore *= 0.3
             }
@@ -366,7 +378,8 @@ func MMRRerank(results []SearchResult, lambda float64, simThreshold float64) []S
 
         if bestIdx >= 0 {
             selected = append(selected, remaining[bestIdx])
-            remaining = append(remaining[:bestIdx], remaining[bestIdx+1:]...)
+            // 安全删除：不修改原始切片
+            remaining = append(remaining[:bestIdx:bestIdx], remaining[bestIdx+1:]...)
         } else {
             break
         }
@@ -378,20 +391,25 @@ func MMRRerank(results []SearchResult, lambda float64, simThreshold float64) []S
 
 ### 5.3 集成点
 
-在 `ApplyScoring` 最后一步添加：
+MMR 需要在 **MCP recall 路径** 中集成，因为 `HybridSearch` 直接返回 `topK` 结果，
+不经过 `ApplyScoring`。正确的集成点是 `handleMemoryRecall`：
 
 ```go
-func ApplyScoring(results []SearchResult, config ScoringConfig) []SearchResult {
-    // ... 现有评分逻辑 ...
+// internal/mcp/tools.go — handleMemoryRecall 中，在 filter 之后、formatContext 之前
+func (s *Server) handleMemoryRecall(ctx, params) {
+    // ... HybridSearch + filter ...
 
-    // 新增：MMR 多样性
-    if config.MMREnabled {
-        filtered = MMRRerank(filtered, 0.7, 0.85)
+    // 新增：MMR 多样性去重（需要向量，见下方注意事项）
+    if config.MMREnabled && len(filtered) > 1 {
+        filtered = store.MMRRerank(filtered, config.MMRLambda, config.MMRSimThreshold)
     }
 
-    return topK(filtered, len(filtered))
+    formatted := formatContext(filtered, memoryBudget)
+    // ...
 }
 ```
+
+> **注意**：也应在 `ApplyScoring` 中添加 MMR 调用，确保层次检索路径同样受益。
 
 ---
 
@@ -413,6 +431,8 @@ memory-lancedb-pro 有两个独立机制：
 func applyTimeDecay(results []SearchResult, config ScoringConfig) {
     halfLife := config.TimeDecayHalfLifeDays
     if halfLife <= 0 { halfLife = 60 }
+    floor := config.TimeDecayFloor
+    if floor <= 0 { floor = 0.5 } // 可配置地板值，默认 0.5
     now := time.Now().Unix()
 
     for i := range results {
@@ -420,9 +440,10 @@ func applyTimeDecay(results []SearchResult, config ScoringConfig) {
         if ts <= 0 { ts = now }
         ageDays := float64(now-ts) / SecondsPerDay
 
-        // 乘法衰减：score *= 0.5 + 0.5 * exp(-age/halfLife)
-        // 地板 0.5x，永远不会完全归零
-        decay := 0.5 + 0.5*math.Exp(-ageDays/float64(halfLife))
+        // 乘法衰减：score *= floor + (1-floor) * exp(-ln(2) * age / halfLife)
+        // 使用 ln(2) 确保恰好在 halfLife 天时衰减到 floor + (1-floor)*0.5
+        // 即：60 天时得分 = floor + (1-floor)*0.5 = 0.75x（当 floor=0.5 时）
+        decay := floor + (1-floor)*math.Exp(-math.Ln2*ageDays/float64(halfLife))
         results[i].Score *= decay
     }
 }
@@ -436,6 +457,7 @@ type ScoringConfig struct {
 
     // 新增
     TimeDecayHalfLifeDays int     // 乘法衰减半衰期（默认 60）
+    TimeDecayFloor        float64 // 衰减地板值（默认 0.5，范围 0-1）
     MMREnabled            bool    // 是否启用 MMR 多样性
     MMRLambda             float64 // MMR lambda（默认 0.7）
     MMRSimThreshold       float64 // MMR 相似度阈值（默认 0.85）

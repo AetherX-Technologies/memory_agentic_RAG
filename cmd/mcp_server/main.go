@@ -1,125 +1,158 @@
 // MCP Server binary — runs over stdio for Claude Code / Chatbox / AI Agent integration.
 //
-// All three services (embedding, LLM, rerank) are independently configurable.
-// Each can point to a different provider/URL/key/model.
-// If not configured, the corresponding feature is disabled gracefully.
+// Reads config.yaml for embedding/LLM/rerank settings.
+// Environment variables override config.yaml values.
 //
-// Environment variables:
-//
-//	MEMORY_DB_PATH            — SQLite database path (default: memory.db)
-//
-//	── Embedding (for vector semantic search) ──
-//	MEMORY_EMBED_PROVIDER     — "jina", "openai", or "" to disable (default: "")
-//	MEMORY_EMBED_KEY          — API key
-//	MEMORY_EMBED_MODEL        — Model name (default per provider)
-//	MEMORY_EMBED_ENDPOINT     — API URL (default per provider)
-//
-//	── LLM (for memory consolidation) ──
-//	MEMORY_LLM_KEY            — API key, omit to disable consolidation
-//	MEMORY_LLM_MODEL          — Model name (default: gpt-4o)
-//	MEMORY_LLM_ENDPOINT       — API URL (default: https://api.openai.com/v1/chat/completions)
-//
-//	── Reranker (for search result reranking) ──
-//	MEMORY_RERANK_PROVIDER    — "jina", or "" to disable (default: "")
-//	MEMORY_RERANK_KEY         — API key
-//	MEMORY_RERANK_MODEL       — Model name (default per provider)
-//	MEMORY_RERANK_ENDPOINT    — API URL (default per provider)
-//
-// Examples:
-//
-//	# Minimal (BM25-only, no external APIs):
-//	MEMORY_DB_PATH=~/memory.db ./hybridmem-mcp
-//
-//	# Embedding only (Jina):
-//	MEMORY_EMBED_PROVIDER=jina MEMORY_EMBED_KEY=xxx ./hybridmem-mcp
-//
-//	# All three, different providers:
-//	MEMORY_EMBED_PROVIDER=openai MEMORY_EMBED_KEY=sk-xxx MEMORY_EMBED_ENDPOINT=https://my-proxy/v1/embeddings \
-//	MEMORY_LLM_KEY=sk-yyy MEMORY_LLM_ENDPOINT=https://my-llm/v1/chat/completions MEMORY_LLM_MODEL=gpt-4o \
-//	MEMORY_RERANK_PROVIDER=jina MEMORY_RERANK_KEY=zzz \
-//	./hybridmem-mcp
+// Environment variables (all optional, override config.yaml):
+//   MEMORY_DB_PATH, MEMORY_CONFIG_PATH,
+//   MEMORY_EMBED_PROVIDER, MEMORY_EMBED_KEY, MEMORY_EMBED_MODEL, MEMORY_EMBED_ENDPOINT,
+//   MEMORY_LLM_KEY, MEMORY_LLM_MODEL, MEMORY_LLM_ENDPOINT,
+//   MEMORY_RERANK_PROVIDER, MEMORY_RERANK_KEY, MEMORY_RERANK_MODEL, MEMORY_RERANK_ENDPOINT,
+//   MEMORY_SINGLE_TOOL=1, MEMORY_EXPOSE_ALL_TOOLS=1
 package main
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/yourusername/hybridmem-rag/internal/config"
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
+	"github.com/yourusername/hybridmem-rag/internal/embedder"
 	"github.com/yourusername/hybridmem-rag/internal/mcp"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 )
 
 func main() {
-	dbPath := envOr("MEMORY_DB_PATH", "memory.db")
+	// Debug log to file (stderr may be discarded by MCP hosts)
+	logFile, _ := os.OpenFile("/tmp/hybridmem-mcp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if logFile != nil {
+		os.Stderr = logFile
+	}
 
-	// ── Reranker config ──
-	rerankCfg := store.DefaultRerankConfig()
-	rerankCfg.Enabled = false
-	rerankProvider := os.Getenv("MEMORY_RERANK_PROVIDER")
-	rerankKey := os.Getenv("MEMORY_RERANK_KEY")
-	if rerankProvider != "" && rerankKey != "" {
-		rerankCfg.Enabled = true
-		rerankCfg.Provider = rerankProvider
-		rerankCfg.APIKey = rerankKey
-		switch rerankProvider {
-		case "jina":
-			rerankCfg.Model = envOr("MEMORY_RERANK_MODEL", "jina-reranker-v2-base-multilingual")
-			rerankCfg.Endpoint = envOr("MEMORY_RERANK_ENDPOINT", "https://api.jina.ai/v1/rerank")
-		default:
-			rerankCfg.Model = envOr("MEMORY_RERANK_MODEL", "")
-			rerankCfg.Endpoint = envOr("MEMORY_RERANK_ENDPOINT", "")
+	// ── Load config.yaml ──
+	configPath := envOr("MEMORY_CONFIG_PATH", "")
+	var cfg *config.AppConfig
+	if configPath != "" {
+		var err error
+		cfg, err = config.Load(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] config load error: %v\n", err)
 		}
-		fmt.Fprintf(os.Stderr, "[memory] reranker: %s/%s @ %s\n", rerankProvider, rerankCfg.Model, rerankCfg.Endpoint)
+	}
+	if cfg == nil {
+		// Try default locations
+		for _, p := range []string{"config.yaml", filepath.Join(filepath.Dir(os.Args[0]), "config.yaml")} {
+			if _, err := os.Stat(p); err == nil {
+				cfg, _ = config.Load(p)
+				if cfg != nil {
+					fmt.Fprintf(os.Stderr, "[memory] loaded config: %s\n", p)
+					break
+				}
+			}
+		}
+	}
+	if cfg == nil {
+		cfg = &config.AppConfig{}
+		config.Load("") // just to apply defaults — ignore error
+	}
+
+	// ── DB path (env overrides config) ──
+	dbPath := envOr("MEMORY_DB_PATH", cfg.Store.DBPath)
+	if dbPath == "" {
+		dbPath = "memory.db"
+	}
+
+	// ── Reranker ──
+	rerankProvider := envOr("MEMORY_RERANK_PROVIDER", cfg.Rerank.Provider)
+	rerankKey := envOr("MEMORY_RERANK_KEY", cfg.Rerank.APIKey)
+	storeCfg := cfg.ToStoreConfig()
+	storeCfg.DBPath = dbPath
+	if rerankProvider != "" && rerankKey != "" {
+		storeCfg.RerankConfig.Enabled = true
+		storeCfg.RerankConfig.Provider = rerankProvider
+		storeCfg.RerankConfig.APIKey = rerankKey
+		storeCfg.RerankConfig.Model = envOr("MEMORY_RERANK_MODEL", storeCfg.RerankConfig.Model)
+		storeCfg.RerankConfig.Endpoint = envOr("MEMORY_RERANK_ENDPOINT", storeCfg.RerankConfig.Endpoint)
+		fmt.Fprintf(os.Stderr, "[memory] reranker: %s/%s\n", rerankProvider, storeCfg.RerankConfig.Model)
 	} else {
+		storeCfg.RerankConfig.Enabled = false
 		fmt.Fprintf(os.Stderr, "[memory] reranker: disabled\n")
 	}
 
-	// ── Store ──
-	st, err := store.New(store.Config{
-		DBPath:       dbPath,
-		RerankConfig: rerankCfg,
-	})
+	st, err := store.New(storeCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open store: %v\n", err)
 		os.Exit(1)
 	}
 	defer st.Close()
 
-	// ── Embedding config ──
-	var embedder store.Embedder
-	embedProvider := os.Getenv("MEMORY_EMBED_PROVIDER")
+	// ── Embedding ──
+	var emb store.Embedder
+	embedProvider := envOr("MEMORY_EMBED_PROVIDER", cfg.Embedding.Provider)
 	embedKey := os.Getenv("MEMORY_EMBED_KEY")
-	if embedProvider != "" && embedKey != "" {
-		cfg := store.EmbeddingConfig{
-			Enabled:  true,
-			Provider: embedProvider,
-			APIKey:   embedKey,
-			Timeout:  10,
-		}
+	if embedKey == "" && (embedProvider == "jina" || embedProvider == "openai") {
+		// Check config for API key
 		switch embedProvider {
 		case "jina":
-			cfg.Model = envOr("MEMORY_EMBED_MODEL", "jina-embeddings-v3")
-			cfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", "https://api.jina.ai/v1/embeddings")
+			embedKey = cfg.Embedding.Jina.APIKey
 		case "openai":
-			cfg.Model = envOr("MEMORY_EMBED_MODEL", "text-embedding-3-small")
-			cfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", "https://api.openai.com/v1/embeddings")
-		default:
-			cfg.Model = envOr("MEMORY_EMBED_MODEL", "")
-			cfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", "")
+			embedKey = cfg.Embedding.OpenAI.APIKey
 		}
-		embedder = store.NewEmbedder(cfg)
-		fmt.Fprintf(os.Stderr, "[memory] embedding: %s/%s @ %s\n", embedProvider, cfg.Model, cfg.Endpoint)
-	} else {
+	}
+
+	switch embedProvider {
+	case "local":
+		// Local ONNX embedding (Qwen3-0.6B)
+		localCfg := cfg.ToLocalEmbedderConfig()
+		// Resolve relative model path
+		if !filepath.IsAbs(localCfg.ModelPath) && localCfg.ModelPath != "" {
+			// Try relative to executable, then CWD
+			exeDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+			candidate := filepath.Join(exeDir, localCfg.ModelPath)
+			if _, err := os.Stat(candidate); err == nil {
+				localCfg.ModelPath = candidate
+			}
+		}
+		localEmb, err := embedder.NewLocalEmbedder(localCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[memory] local embedder failed: %v (falling back to BM25-only)\n", err)
+		} else {
+			emb = localEmb
+			fmt.Fprintf(os.Stderr, "[memory] embedding: local Qwen3 (%s)\n", localCfg.ModelPath)
+		}
+	case "jina", "openai":
+		if embedKey != "" {
+			apiCfg := store.EmbeddingConfig{
+				Enabled:  true,
+				Provider: embedProvider,
+				APIKey:   embedKey,
+				Timeout:  10,
+			}
+			switch embedProvider {
+			case "jina":
+				apiCfg.Model = envOr("MEMORY_EMBED_MODEL", cfg.Embedding.Jina.Model)
+				apiCfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", cfg.Embedding.Jina.Endpoint)
+			case "openai":
+				apiCfg.Model = envOr("MEMORY_EMBED_MODEL", cfg.Embedding.OpenAI.Model)
+				apiCfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", cfg.Embedding.OpenAI.Endpoint)
+			}
+			emb = store.NewEmbedder(apiCfg)
+			fmt.Fprintf(os.Stderr, "[memory] embedding: %s/%s\n", embedProvider, apiCfg.Model)
+		} else {
+			fmt.Fprintf(os.Stderr, "[memory] embedding: %s configured but no API key\n", embedProvider)
+		}
+	default:
 		fmt.Fprintf(os.Stderr, "[memory] embedding: disabled (BM25-only)\n")
 	}
 
-	// ── LLM config (for consolidation) ──
+	// ── LLM (for consolidation) ──
 	var cons *consolidate.Consolidator
-	llmKey := os.Getenv("MEMORY_LLM_KEY")
+	llmKey := envOr("MEMORY_LLM_KEY", cfg.LLM.APIKey)
 	if llmKey != "" {
-		llmEndpoint := envOr("MEMORY_LLM_ENDPOINT", "https://api.openai.com/v1/chat/completions")
-		llmModel := envOr("MEMORY_LLM_MODEL", "gpt-4o")
+		llmEndpoint := envOr("MEMORY_LLM_ENDPOINT", cfg.LLM.Endpoint)
+		llmModel := envOr("MEMORY_LLM_MODEL", cfg.LLM.Model)
 		cons = consolidate.New(st, consolidate.Config{
 			LLMAPIKey:   llmKey,
 			LLMModel:    llmModel,
@@ -129,16 +162,10 @@ func main() {
 		})
 		fmt.Fprintf(os.Stderr, "[memory] LLM: %s @ %s\n", llmModel, llmEndpoint)
 	} else {
-		fmt.Fprintf(os.Stderr, "[memory] LLM: disabled (no consolidation)\n")
+		fmt.Fprintf(os.Stderr, "[memory] LLM: disabled\n")
 	}
 
-	// Debug log to file (stderr may be discarded by MCP hosts)
-	logFile, _ := os.OpenFile("/tmp/hybridmem-mcp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if logFile != nil {
-		os.Stderr = logFile
-	}
-
-	srv := mcp.New(st, embedder, mcp.DefaultConfig(), cons)
+	srv := mcp.New(st, emb, mcp.DefaultConfig(), cons)
 	fmt.Fprintf(os.Stderr, "[memory] server ready (db=%s)\n", dbPath)
 
 	if err := srv.Run(context.Background()); err != nil {

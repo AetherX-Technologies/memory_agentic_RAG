@@ -3,7 +3,7 @@
 > **AI Agent 记忆系统 — 从被动检索到主动知识合成**
 > Pure Go • MCP Server • Cross-platform • 10k memories in 39ms
 
-[中文文档](./README_CN.md) | [Architecture](./docs/architecture/INDEX.md) | [Design Doc](./.context/ai-memory-system-design.md)
+[使用指南](./docs/USAGE_GUIDE.md) | [中文文档](./README_CN.md) | [Architecture](./docs/architecture/INDEX.md) | [Design Doc](./.context/ai-memory-system-design.md)
 
 ---
 

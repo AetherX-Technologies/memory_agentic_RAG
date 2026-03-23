@@ -26,7 +26,7 @@ var forceRetrievePatterns = []*regexp.Regexp{
 var questionPatterns = []*regexp.Regexp{
 	// "do you remember" / "can you recall" / "did I tell you" — questions, not statements
 	regexp.MustCompile(`(?i)\b(do you remember|can you recall|did i (tell|say|mention))\b`),
-	regexp.MustCompile(`(你记得吗|你还记得|我告诉过你吗)`),
+	regexp.MustCompile(`(你记得.{0,10}吗|你还记得|我告诉过你吗)`),
 	// "what is my X" / "我的X是什么"
 	regexp.MustCompile(`(?i)\b(what (is|was) my|what did (i|we))\b`),
 	regexp.MustCompile(`(我的\S+是什么|我(说过|提到过)什么)`),

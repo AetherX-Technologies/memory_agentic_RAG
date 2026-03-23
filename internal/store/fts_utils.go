@@ -15,15 +15,30 @@ func EscapeFTS5Query(query string) string {
 		return "\"" + trimmed + "\""
 	}
 
-	// 检查是否包含 FTS5 特殊字符
-	if strings.ContainsAny(trimmed, "+-\"*(){}[]?!@#$%^&:;,.<>~/\\|") ||
-		strings.Contains(trimmed, " AND ") ||
-		strings.Contains(trimmed, " OR ") ||
-		strings.Contains(trimmed, " NOT ") {
-		// 转义内部引号并用引号包裹
-		escaped := strings.ReplaceAll(trimmed, "\"", "\"\"")
+	// Strip FTS5 special characters instead of quoting entire query
+	// (quoting turns term queries into phrase queries, hurting recall)
+	cleaned := strings.Map(func(r rune) rune {
+		if strings.ContainsRune("+-\"*(){}[]?!@#$%^&:;,.<>~/\\|", r) {
+			return ' '
+		}
+		return r
+	}, trimmed)
+
+	// Collapse whitespace
+	parts := strings.Fields(cleaned)
+	if len(parts) == 0 {
+		return "\"\""
+	}
+
+	result := strings.Join(parts, " ")
+
+	// Check for FTS5 operators in the cleaned result
+	if strings.Contains(result, " AND ") ||
+		strings.Contains(result, " OR ") ||
+		strings.Contains(result, " NOT ") {
+		escaped := strings.ReplaceAll(result, "\"", "\"\"")
 		return "\"" + escaped + "\""
 	}
 
-	return trimmed
+	return result
 }

@@ -23,6 +23,15 @@ type ScoringConfig struct {
 	// AI memory system factors
 	ConfidenceWeight float64 // multiplier for confidence (default: 1.0)
 	AccessBoostCap   float64 // max access frequency boost (default: 1.5)
+
+	// Multiplicative time decay
+	TimeDecayHalfLifeDays int     // half-life in days (default: 60)
+	TimeDecayFloor        float64 // minimum decay factor (default: 0.5, range 0-1)
+
+	// MMR diversity reranking
+	MMREnabled      bool    // enable MMR reranking
+	MMRLambda       float64 // relevance vs diversity (default: 0.7)
+	MMRSimThreshold float64 // similarity threshold for hard penalty (default: 0.85)
 }
 
 // TypeHalfLife returns the recency half-life override for a memory type.
@@ -53,6 +62,7 @@ func ApplyScoring(results []SearchResult, config ScoringConfig) []SearchResult {
 	applyLengthNormalization(results, config)
 	applyConfidenceWeight(results, config)
 	applyAccessBoost(results, config)
+	applyTimeDecay(results, config, now)
 
 	// 过滤并排序
 	filtered := make([]SearchResult, 0, len(results))
@@ -60,6 +70,19 @@ func ApplyScoring(results []SearchResult, config ScoringConfig) []SearchResult {
 		if r.Score >= config.HardMinScore {
 			filtered = append(filtered, r)
 		}
+	}
+
+	// MMR diversity reranking
+	if config.MMREnabled && len(filtered) > 1 {
+		lambda := config.MMRLambda
+		if lambda <= 0 {
+			lambda = 0.7
+		}
+		threshold := config.MMRSimThreshold
+		if threshold <= 0 {
+			threshold = 0.85
+		}
+		filtered = MMRRerank(filtered, lambda, threshold)
 	}
 
 	return topK(filtered, len(filtered))
@@ -149,5 +172,36 @@ func applyAccessBoost(results []SearchResult, config ScoringConfig) {
 			boost = cap
 		}
 		results[i].Score *= boost
+	}
+}
+
+// applyTimeDecay applies multiplicative time decay.
+// Formula: score *= floor + (1-floor) * exp(-ln(2) * ageDays / halfLife)
+// At exactly halfLife days, excess above floor halves: decay = floor + (1-floor)*0.5
+func applyTimeDecay(results []SearchResult, config ScoringConfig, now int64) {
+	halfLife := config.TimeDecayHalfLifeDays
+	if halfLife <= 0 {
+		return // disabled
+	}
+	floor := config.TimeDecayFloor
+	if floor < 0 {
+		floor = 0.5
+	}
+	if floor > 1 {
+		floor = 1
+	}
+
+	for i := range results {
+		ts := results[i].Entry.Timestamp
+		if ts <= 0 {
+			ts = now
+		}
+		ageDays := float64(now-ts) / SecondsPerDay
+		if ageDays < 0 {
+			ageDays = 0
+		}
+
+		decay := floor + (1-floor)*math.Exp(-math.Ln2*ageDays/float64(halfLife))
+		results[i].Score *= decay
 	}
 }

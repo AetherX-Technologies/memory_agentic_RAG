@@ -99,4 +99,15 @@ var toolDefinitions = []map[string]interface{}{
 			"properties": map[string]interface{}{},
 		},
 	},
+	{
+		"name":        "memory_should_capture",
+		"description": "判断一段文本是否包含值得记忆的内容（触发词检测）。用于在存储前预检，避免存储噪音。",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"text": map[string]string{"type": "string", "description": "要检测的文本"},
+			},
+			"required": []string{"text"},
+		},
+	},
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yourusername/hybridmem-rag/internal/store"
+	"github.com/yourusername/hybridmem-rag/internal/trigger"
 )
 
 // registerTools registers all MCP tool handlers.
@@ -21,6 +22,7 @@ func (s *Server) registerTools() {
 	s.handlers["memory_import"] = s.handleMemoryImport
 	s.handlers["memory_forget_by_tag"] = s.handleMemoryForgetByTag
 	s.handlers["memory_consolidate"] = s.handleMemoryConsolidate
+	s.handlers["memory_should_capture"] = s.handleShouldCapture
 }
 
 // ── memory_consolidate ──
@@ -81,6 +83,15 @@ func (s *Server) handleMemoryStore(ctx context.Context, params json.RawMessage) 
 	if p.Content == "" {
 		return nil, fmt.Errorf("content is required")
 	}
+
+	// Noise filter: reject AI denials, meta-questions, boilerplate
+	if isNoise, reason := trigger.IsNoise(p.Content); isNoise {
+		return map[string]interface{}{
+			"action": "filtered",
+			"reason": "noise: " + reason,
+		}, nil
+	}
+
 	if p.Type == "" {
 		p.Type = "fact"
 	}
@@ -149,6 +160,16 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 		p.MaxTokens = 1000
 	}
 
+	// Adaptive skip: don't retrieve for greetings, confirmations, shell commands, etc.
+	if !trigger.ShouldRetrieve(p.Query) {
+		return map[string]interface{}{
+			"count":   0,
+			"context": "",
+			"skipped": true,
+			"reason":  "query does not require memory retrieval",
+		}, nil
+	}
+
 	// Embed query
 	var queryVec []float32
 	if s.embedder != nil {
@@ -163,7 +184,7 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 		return nil, err
 	}
 
-	// Filter by types and importance
+	// Filter by types, importance, and noise
 	var filtered []store.SearchResult
 	for _, r := range results {
 		if p.MinImportance > 0 && r.Entry.Importance < p.MinImportance {
@@ -172,10 +193,19 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 		if len(p.Types) > 0 && !contains(p.Types, r.Entry.MemoryType) {
 			continue
 		}
+		// Skip noise in recall results
+		if isNoise, _ := trigger.IsNoise(r.Entry.Text); isNoise {
+			continue
+		}
 		filtered = append(filtered, r)
 		if len(filtered) >= p.Limit {
 			break
 		}
+	}
+
+	// MMR diversity reranking
+	if len(filtered) > 1 {
+		filtered = store.MMRRerank(filtered, 0.7, 0.85)
 	}
 
 	// Reserve tokens for consolidation insights (20% of budget)
@@ -483,6 +513,37 @@ func (s *Server) handleMemoryForgetByTag(ctx context.Context, params json.RawMes
 	if failed > 0 {
 		result["failed"] = failed
 	}
+	return result, nil
+}
+
+// ── memory_should_capture ──
+
+func (s *Server) handleShouldCapture(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.Text == "" {
+		return nil, fmt.Errorf("text is required")
+	}
+
+	shouldCapture, reason := trigger.ShouldCapture(p.Text)
+	result := map[string]interface{}{
+		"should_capture": shouldCapture,
+	}
+	if shouldCapture {
+		result["reason"] = string(reason)
+		result["confidence"] = trigger.ConfidenceForReason(reason)
+	}
+
+	// Also check noise
+	if isNoise, noiseType := trigger.IsNoise(p.Text); isNoise {
+		result["should_capture"] = false
+		result["reason"] = "noise: " + noiseType
+	}
+
 	return result, nil
 }
 

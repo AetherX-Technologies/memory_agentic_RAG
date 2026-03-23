@@ -77,12 +77,14 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		var body []byte
+		useLegacy := false
 		if peek[0] == 'C' || peek[0] == 'c' {
 			// Content-Length framing (standard MCP stdio)
 			body, err = readContentLengthMessage(reader)
 		} else if peek[0] == '{' {
 			// Legacy newline-delimited JSON
 			body, err = readLineMessage(reader)
+			useLegacy = true
 		} else {
 			// Skip unexpected bytes (blank lines, etc)
 			reader.ReadByte()
@@ -101,19 +103,30 @@ func (s *Server) Run(ctx context.Context) error {
 
 		var req JSONRPCRequest
 		if err := json.Unmarshal(body, &req); err != nil {
-			s.writeContentLength(os.Stdout, &JSONRPCResponse{
+			resp := &JSONRPCResponse{
 				JSONRPC: "2.0",
 				Error:   &JSONRPCError{Code: -32700, Message: "Parse error"},
-			})
+			}
+			if useLegacy {
+				s.writeLineJSON(os.Stdout, resp)
+			} else {
+				s.writeContentLength(os.Stdout, resp)
+			}
 			continue
 		}
 
 		resp := s.handleRequest(ctx, &req)
 		if resp != nil {
-			s.writeContentLength(os.Stdout, resp)
+			if useLegacy {
+				s.writeLineJSON(os.Stdout, resp)
+			} else {
+				s.writeContentLength(os.Stdout, resp)
+			}
 		}
 	}
 }
+
+const maxContentLength = 64 * 1024 * 1024 // 64MB cap, same as legacy scanner
 
 // readContentLengthMessage reads a message framed with Content-Length header.
 func readContentLengthMessage(reader *bufio.Reader) ([]byte, error) {
@@ -140,6 +153,9 @@ func readContentLengthMessage(reader *bufio.Reader) ([]byte, error) {
 	if contentLength <= 0 {
 		return nil, nil
 	}
+	if contentLength > maxContentLength {
+		return nil, fmt.Errorf("Content-Length %d exceeds max %d", contentLength, maxContentLength)
+	}
 	body := make([]byte, contentLength)
 	_, err := io.ReadFull(reader, body)
 	return body, err
@@ -152,6 +168,16 @@ func readLineMessage(reader *bufio.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimRight(line, "\r\n"), nil
+}
+
+// writeLineJSON writes a JSON-RPC response as a single line (legacy mode).
+func (s *Server) writeLineJSON(w io.Writer, resp *JSONRPCResponse) {
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	w.Write(body)
+	w.Write([]byte("\n"))
 }
 
 // writeContentLength writes a JSON-RPC response with Content-Length framing.

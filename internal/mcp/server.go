@@ -97,12 +97,14 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			// Fatal frame errors (e.g. oversized Content-Length) terminate the session
 			// because the stream is desynchronized and cannot be recovered.
+			// Return nil so main() exits cleanly (status 0) — the client will reconnect.
 			if _, fatal := err.(*fatalFrameError); fatal {
 				s.writeContentLength(os.Stdout, &JSONRPCResponse{
 					JSONRPC: "2.0",
 					Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
 				})
-				return err
+				fmt.Fprintf(os.Stderr, "[memory] fatal frame error, closing session: %v\n", err)
+				return nil
 			}
 			// Non-fatal read errors: send JSON-RPC error and continue
 			if useLegacy {

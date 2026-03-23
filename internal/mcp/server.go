@@ -95,7 +95,19 @@ func (s *Server) Run(ctx context.Context) error {
 			if err == io.EOF {
 				return nil
 			}
-			return err
+			// Non-fatal read errors: send JSON-RPC error and continue
+			if useLegacy {
+				s.writeLineJSON(os.Stdout, &JSONRPCResponse{
+					JSONRPC: "2.0",
+					Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
+				})
+			} else {
+				s.writeContentLength(os.Stdout, &JSONRPCResponse{
+					JSONRPC: "2.0",
+					Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
+				})
+			}
+			continue
 		}
 		if len(body) == 0 {
 			continue
@@ -154,6 +166,8 @@ func readContentLengthMessage(reader *bufio.Reader) ([]byte, error) {
 		return nil, nil
 	}
 	if contentLength > maxContentLength {
+		// Drain the oversized body to keep the stream in sync, then return error
+		io.CopyN(io.Discard, reader, int64(contentLength))
 		return nil, fmt.Errorf("Content-Length %d exceeds max %d", contentLength, maxContentLength)
 	}
 	body := make([]byte, contentLength)

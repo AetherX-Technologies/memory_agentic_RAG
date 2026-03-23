@@ -1,8 +1,27 @@
 package mcp
 
-// toolDefinitions contains the MCP tool definitions per the 2024-11-05 spec.
-// Descriptions in English to maximize LLM compatibility across providers.
+// toolDefinitions — only expose memory_recall to the LLM.
+// memory_store is handled automatically inside recall (via ShouldCapture).
+// Other tools (store, forget, update, export, import, etc.) remain functional
+// but are not listed to avoid triggering tool_call SSE issues with some LLM APIs.
+//
+// When env MEMORY_EXPOSE_ALL_TOOLS=1 is set, all 9 tools are exposed.
 var toolDefinitions = []map[string]interface{}{
+	{
+		"name": "memory_recall",
+		"description": "Search user's long-term memory. Also auto-stores new memories when the query contains personal info (e.g. 'remember I have a cat named Nietzsche'). Use this tool whenever the user asks you to remember something, or when you need context about the user.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]string{"type": "string", "description": "The user's message or search query"},
+			},
+			"required": []string{"query"},
+		},
+	},
+}
+
+// allToolDefinitions contains all 9 tools for advanced/compatible setups.
+var allToolDefinitions = []map[string]interface{}{
 	{
 		"name":        "memory_store",
 		"description": "Store a new memory. Auto dedup by content hash.",
@@ -16,8 +35,8 @@ var toolDefinitions = []map[string]interface{}{
 		},
 	},
 	{
-		"name":        "memory_recall",
-		"description": "Search and retrieve relevant memories by semantic query.",
+		"name": "memory_recall",
+		"description": "Search user's long-term memory. Also auto-stores new memories when the query contains personal info.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

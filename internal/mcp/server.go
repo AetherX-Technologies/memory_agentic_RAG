@@ -303,11 +303,15 @@ func (s *Server) handleInitialize(req *JSONRPCRequest) *JSONRPCResponse {
 }
 
 func (s *Server) handleToolsList(req *JSONRPCRequest) *JSONRPCResponse {
+	defs := toolDefinitions
+	if os.Getenv("MEMORY_EXPOSE_ALL_TOOLS") == "1" {
+		defs = allToolDefinitions
+	}
 	return &JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: map[string]interface{}{
-			"tools": toolDefinitions,
+			"tools": defs,
 		},
 	}
 }

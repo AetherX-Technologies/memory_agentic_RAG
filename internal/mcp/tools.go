@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/yourusername/hybridmem-rag/internal/store"
@@ -158,6 +159,14 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 	}
 	if p.MaxTokens <= 0 {
 		p.MaxTokens = 1000
+	}
+
+	// Auto-capture: if the query contains memory-worthy content, store it first.
+	// This enables "remember X" to work without a separate tool_call for memory_store.
+	if shouldCapture, reason := trigger.ShouldCapture(p.Query); shouldCapture {
+		if isNoise, _ := trigger.IsNoise(p.Query); !isNoise {
+			go s.autoStore(p.Query, reason)
+		}
 	}
 
 	// Adaptive skip: don't retrieve for greetings, confirmations, shell commands, etc.
@@ -545,6 +554,52 @@ func (s *Server) handleShouldCapture(ctx context.Context, params json.RawMessage
 	}
 
 	return result, nil
+}
+
+// autoStore stores a memory-worthy text in the background.
+// Called from memory_recall when ShouldCapture triggers.
+func (s *Server) autoStore(text string, reason trigger.CaptureReason) {
+	h := sha256.Sum256([]byte(text))
+	contentHash := hex.EncodeToString(h[:8])
+
+	var vec []float32
+	if s.embedder != nil {
+		if v, err := s.embedder.Embed(text); err == nil {
+			vec = v
+		}
+	}
+
+	memType := "fact"
+	switch reason {
+	case trigger.ReasonExplicit:
+		memType = "fact"
+	case trigger.ReasonImplicit:
+		memType = "fact"
+	case trigger.ReasonPattern:
+		memType = "fact"
+	}
+
+	mem := &store.Memory{
+		Text:        text,
+		Category:    "memory",
+		Scope:       "global",
+		Importance:  0.7,
+		MemoryType:  memType,
+		Confidence:  trigger.ConfidenceForReason(reason),
+		ContentHash: contentHash,
+		Vector:      vec,
+	}
+
+	if id, err := s.store.Insert(mem); err == nil {
+		fmt.Fprintf(os.Stderr, "[memory] auto-stored: %s (reason=%s, id=%s)\n", text[:min(len(text), 30)], reason, id[:8])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ── helpers ──

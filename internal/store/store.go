@@ -514,13 +514,18 @@ func (s *sqliteStore) RecordSupersession(oldID, newID string) error {
 
 // SoftDelete moves a memory to the trash bin.
 func (s *sqliteStore) SoftDelete(id string, now int64) error {
-	_, err := s.db.Exec(`UPDATE memories SET deleted_at = ? WHERE id = ? AND deleted_at = 0`, now, id)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	// Remove from FTS to keep BM25 corpus clean
-	s.db.Exec("DELETE FROM fts_memories WHERE memory_id = ?", id)
-	return nil
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE memories SET deleted_at = ? WHERE id = ? AND deleted_at = 0`, now, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM fts_memories WHERE memory_id = ?", id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Restore recovers a memory from the trash bin.
@@ -533,11 +538,17 @@ func (s *sqliteStore) Restore(id string) error {
 	if err != nil {
 		return err
 	}
-	// Re-insert FTS entry for restored memory (delete first to avoid duplicates)
+	// Re-insert FTS entry for restored memory (in transaction to avoid partial state)
 	var text string
 	if err := s.db.QueryRow("SELECT text FROM memories WHERE id = ?", id).Scan(&text); err == nil {
-		s.db.Exec("DELETE FROM fts_memories WHERE memory_id = ?", id)
-		s.db.Exec("INSERT INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
+		tx2, err := s.db.Begin()
+		if err == nil {
+			tx2.Exec("DELETE FROM fts_memories WHERE memory_id = ?", id)
+			tx2.Exec("INSERT INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
+			if err := tx2.Commit(); err != nil {
+				fmt.Fprintf(os.Stderr, "[store] FTS restore warning: %v\n", err)
+			}
+		}
 	}
 	return nil
 }

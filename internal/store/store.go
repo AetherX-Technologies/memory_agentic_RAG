@@ -515,7 +515,12 @@ func (s *sqliteStore) RecordSupersession(oldID, newID string) error {
 // SoftDelete moves a memory to the trash bin.
 func (s *sqliteStore) SoftDelete(id string, now int64) error {
 	_, err := s.db.Exec(`UPDATE memories SET deleted_at = ? WHERE id = ? AND deleted_at = 0`, now, id)
-	return err
+	if err != nil {
+		return err
+	}
+	// Remove from FTS to keep BM25 corpus clean
+	s.db.Exec("DELETE FROM fts_memories WHERE memory_id = ?", id)
+	return nil
 }
 
 // Restore recovers a memory from the trash bin.
@@ -528,10 +533,11 @@ func (s *sqliteStore) Restore(id string) error {
 	if err != nil {
 		return err
 	}
-	// Re-insert FTS entry for restored memory
+	// Re-insert FTS entry for restored memory (delete first to avoid duplicates)
 	var text string
 	if err := s.db.QueryRow("SELECT text FROM memories WHERE id = ?", id).Scan(&text); err == nil {
-		s.db.Exec("INSERT OR IGNORE INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
+		s.db.Exec("DELETE FROM fts_memories WHERE memory_id = ?", id)
+		s.db.Exec("INSERT INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
 	}
 	return nil
 }

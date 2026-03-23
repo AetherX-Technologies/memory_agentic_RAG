@@ -204,9 +204,11 @@ func initSchema(db *sql.DB) error {
 		return fmt.Errorf("failed to migrate memory system: %w", err)
 	}
 
-	// Rebuild FTS index from ALL memories (including trashed) with CJK segmentation.
+	// Rebuild FTS index from active memories with CJK segmentation.
 	// Must run after migrations so deleted_at/expired columns exist.
-	rows, err := db.Query("SELECT id, text FROM memories")
+	// Trashed/expired memories excluded to keep BM25 scoring accurate.
+	// Restore() re-inserts FTS entries when memories are un-trashed.
+	rows, err := db.Query("SELECT id, text FROM memories WHERE deleted_at = 0 AND expired = 0")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -523,7 +525,15 @@ func (s *sqliteStore) Restore(id string) error {
 	_, err := s.db.Exec(`UPDATE memories SET deleted_at = 0, expired = 0,
 		expires_at = CASE WHEN expires_at > 0 AND expires_at < ? THEN 0 ELSE expires_at END
 		WHERE id = ? AND deleted_at > 0`, now, id)
-	return err
+	if err != nil {
+		return err
+	}
+	// Re-insert FTS entry for restored memory
+	var text string
+	if err := s.db.QueryRow("SELECT text FROM memories WHERE id = ?", id).Scan(&text); err == nil {
+		s.db.Exec("INSERT OR IGNORE INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
+	}
+	return nil
 }
 
 // ListTrash returns soft-deleted memories ordered by deletion time (newest first).

@@ -54,13 +54,14 @@ func ShouldRetrieve(text string) bool {
 	}
 
 	// 2. Length filter (after force-retrieve to avoid blocking short recall queries)
+	// Thresholds are kept low to allow short keyword queries like "工程师", "Go", "email"
 	runeLen := utf8.RuneCountInString(cleaned)
 	if textIsCJK(cleaned) {
-		if runeLen < 6 {
+		if runeLen < 2 {
 			return false
 		}
 	} else {
-		if runeLen < 15 {
+		if runeLen < 3 {
 			return false
 		}
 	}

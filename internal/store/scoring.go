@@ -72,7 +72,7 @@ func ApplyScoring(results []SearchResult, config ScoringConfig) []SearchResult {
 		}
 	}
 
-	// MMR diversity reranking
+	// MMR diversity reranking — returns its own ordering, skip topK to preserve it
 	if config.MMREnabled && len(filtered) > 1 {
 		lambda := config.MMRLambda
 		if lambda <= 0 {
@@ -82,7 +82,7 @@ func ApplyScoring(results []SearchResult, config ScoringConfig) []SearchResult {
 		if threshold <= 0 {
 			threshold = 0.85
 		}
-		filtered = MMRRerank(filtered, lambda, threshold)
+		return MMRRerank(filtered, lambda, threshold)
 	}
 
 	return topK(filtered, len(filtered))
@@ -184,7 +184,7 @@ func applyTimeDecay(results []SearchResult, config ScoringConfig, now int64) {
 		return // disabled
 	}
 	floor := config.TimeDecayFloor
-	if floor < 0 {
+	if floor <= 0 {
 		floor = 0.5
 	}
 	if floor > 1 {

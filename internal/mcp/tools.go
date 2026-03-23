@@ -184,7 +184,7 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 		return nil, err
 	}
 
-	// Filter by types, importance, and noise
+	// Filter by types, importance, and noise — keep up to Limit*3 for MMR diversity pool
 	var filtered []store.SearchResult
 	for _, r := range results {
 		if p.MinImportance > 0 && r.Entry.Importance < p.MinImportance {
@@ -198,14 +198,14 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 			continue
 		}
 		filtered = append(filtered, r)
-		if len(filtered) >= p.Limit {
-			break
-		}
 	}
 
-	// MMR diversity reranking
+	// MMR diversity reranking on full pool, then truncate to limit
 	if len(filtered) > 1 {
 		filtered = store.MMRRerank(filtered, 0.7, 0.85)
+	}
+	if len(filtered) > p.Limit {
+		filtered = filtered[:p.Limit]
 	}
 
 	// Reserve tokens for consolidation insights (20% of budget)

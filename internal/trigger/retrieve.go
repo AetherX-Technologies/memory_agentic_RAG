@@ -82,11 +82,11 @@ func ShouldRetrieve(text string) bool {
 	// Thresholds are kept low to allow short keyword queries like "工程师", "Go", "email"
 	runeLen := utf8.RuneCountInString(cleaned)
 	if textIsCJK(cleaned) {
-		if runeLen < 2 {
+		if runeLen < 1 {
 			return false
 		}
 	} else {
-		if runeLen < 3 {
+		if runeLen < 2 {
 			return false
 		}
 	}

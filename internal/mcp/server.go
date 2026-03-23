@@ -27,6 +27,7 @@ type Server struct {
 	handlers     map[string]ToolHandler
 	config       Config
 	mu           sync.Mutex
+	stdoutBuf    *bufio.Writer // reusable buffered writer for stdout
 }
 
 // ToolHandler processes a tool call and returns the result content.
@@ -65,6 +66,7 @@ func New(s store.Store, embedder store.Embedder, cfg Config, cons ...*consolidat
 // Also supports legacy newline-delimited JSON for backward compatibility with Claude Code.
 func (s *Server) Run(ctx context.Context) error {
 	reader := bufio.NewReader(os.Stdin)
+	s.stdoutBuf = bufio.NewWriter(os.Stdout)
 
 	for {
 		// Peek at the first bytes to detect framing mode
@@ -206,14 +208,18 @@ func (s *Server) writeLineJSON(w io.Writer, resp *JSONRPCResponse) {
 	if err != nil {
 		return
 	}
-	bw := bufio.NewWriter(w)
-	bw.Write(body)
-	bw.WriteByte('\n')
-	bw.Flush()
+	if s.stdoutBuf != nil && w == os.Stdout {
+		s.stdoutBuf.Write(body)
+		s.stdoutBuf.WriteByte('\n')
+		s.stdoutBuf.Flush()
+	} else {
+		w.Write(body)
+		w.Write([]byte("\n"))
+	}
 }
 
 // writeContentLength writes a JSON-RPC response with Content-Length framing.
-// Uses buffered writer + Flush to ensure the client receives complete frames.
+// Uses reusable buffered writer + Flush to deliver complete frames without extra allocation.
 func (s *Server) writeContentLength(w io.Writer, resp *JSONRPCResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -221,10 +227,14 @@ func (s *Server) writeContentLength(w io.Writer, resp *JSONRPCResponse) {
 	if err != nil {
 		return
 	}
-	bw := bufio.NewWriter(w)
-	fmt.Fprintf(bw, "Content-Length: %d\r\n\r\n", len(body))
-	bw.Write(body)
-	bw.Flush()
+	if s.stdoutBuf != nil && w == os.Stdout {
+		fmt.Fprintf(s.stdoutBuf, "Content-Length: %d\r\n\r\n", len(body))
+		s.stdoutBuf.Write(body)
+		s.stdoutBuf.Flush()
+	} else {
+		fmt.Fprintf(w, "Content-Length: %d\r\n\r\n", len(body))
+		w.Write(body)
+	}
 }
 
 // RunWithIO runs the server with custom reader/writer (for testing).

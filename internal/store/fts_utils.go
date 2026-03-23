@@ -16,7 +16,7 @@ func EscapeFTS5Query(query string) string {
 	}
 
 	// 检查是否包含 FTS5 特殊字符
-	if strings.ContainsAny(trimmed, "+-\"*()") ||
+	if strings.ContainsAny(trimmed, "+-\"*(){}[]?!@#$%^&:;,.<>~/\\|") ||
 		strings.Contains(trimmed, " AND ") ||
 		strings.Contains(trimmed, " OR ") ||
 		strings.Contains(trimmed, " NOT ") {

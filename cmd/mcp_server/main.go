@@ -60,7 +60,7 @@ func main() {
 		cfg = &config.AppConfig{}
 		cfg.Embedding.Provider = "" // env-only mode: no local model unless explicitly set
 		// Apply defaults for LLM/Rerank so env-only deployments work
-		cfg.LLM.Model = "gpt-4o"
+		cfg.LLM.Model = "gpt-4o-mini"
 		cfg.LLM.Endpoint = "https://api.openai.com/v1/chat/completions"
 		cfg.LLM.Timeout = 30
 		cfg.Rerank.Model = "jina-reranker-v2-base-multilingual"
@@ -86,7 +86,7 @@ func main() {
 	storeCfg := cfg.ToStoreConfig()
 	storeCfg.DBPath = dbPath
 	// Only enable reranking if: provider+key present AND config doesn't explicitly disable it
-	rerankExplicitlyDisabled := configPath != "" && !cfg.Rerank.Enabled && os.Getenv("MEMORY_RERANK_PROVIDER") == ""
+	rerankExplicitlyDisabled := !cfg.Rerank.Enabled && os.Getenv("MEMORY_RERANK_PROVIDER") == ""
 	if rerankProvider != "" && rerankKey != "" && !rerankExplicitlyDisabled {
 		storeCfg.RerankConfig.Enabled = true
 		storeCfg.RerankConfig.Provider = rerankProvider

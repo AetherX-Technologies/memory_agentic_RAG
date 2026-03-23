@@ -79,14 +79,12 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		var body []byte
-		useLegacy := false
 		if peek[0] == 'C' || peek[0] == 'c' {
 			// Content-Length framing (standard MCP stdio)
 			body, err = readContentLengthMessage(reader)
 		} else if peek[0] == '{' {
-			// Legacy newline-delimited JSON
+			// Newline-delimited JSON input (Chatbox sends this way)
 			body, err = readLineMessage(reader)
-			useLegacy = true
 		} else {
 			// Skip unexpected bytes (blank lines, etc)
 			reader.ReadByte()
@@ -97,9 +95,6 @@ func (s *Server) Run(ctx context.Context) error {
 			if err == io.EOF {
 				return nil
 			}
-			// Fatal frame errors (e.g. oversized Content-Length) terminate the session
-			// because the stream is desynchronized and cannot be recovered.
-			// Return nil so main() exits cleanly (status 0) — the client will reconnect.
 			if _, fatal := err.(*fatalFrameError); fatal {
 				s.writeContentLength(os.Stdout, &JSONRPCResponse{
 					JSONRPC: "2.0",
@@ -108,18 +103,10 @@ func (s *Server) Run(ctx context.Context) error {
 				fmt.Fprintf(os.Stderr, "[memory] fatal frame error, closing session: %v\n", err)
 				return nil
 			}
-			// Non-fatal read errors: send JSON-RPC error and continue
-			if useLegacy {
-				s.writeLineJSON(os.Stdout, &JSONRPCResponse{
-					JSONRPC: "2.0",
-					Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
-				})
-			} else {
-				s.writeContentLength(os.Stdout, &JSONRPCResponse{
-					JSONRPC: "2.0",
-					Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
-				})
-			}
+			s.writeContentLength(os.Stdout, &JSONRPCResponse{
+				JSONRPC: "2.0",
+				Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
+			})
 			continue
 		}
 		if len(body) == 0 {
@@ -128,25 +115,18 @@ func (s *Server) Run(ctx context.Context) error {
 
 		var req JSONRPCRequest
 		if err := json.Unmarshal(body, &req); err != nil {
-			resp := &JSONRPCResponse{
+			s.writeContentLength(os.Stdout, &JSONRPCResponse{
 				JSONRPC: "2.0",
 				Error:   &JSONRPCError{Code: -32700, Message: "Parse error"},
-			}
-			if useLegacy {
-				s.writeLineJSON(os.Stdout, resp)
-			} else {
-				s.writeContentLength(os.Stdout, resp)
-			}
+			})
 			continue
 		}
 
 		resp := s.handleRequest(ctx, &req)
 		if resp != nil {
-			if useLegacy {
-				s.writeLineJSON(os.Stdout, resp)
-			} else {
-				s.writeContentLength(os.Stdout, resp)
-			}
+			// Always respond with Content-Length framing.
+			// Chatbox SDK sends newline-JSON but expects Content-Length responses.
+			s.writeContentLength(os.Stdout, resp)
 		}
 	}
 }

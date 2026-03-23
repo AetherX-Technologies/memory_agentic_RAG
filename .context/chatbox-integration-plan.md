@@ -157,15 +157,17 @@ class MemoryKnowledgeBase implements KnowledgeBaseController {
     const textContent = mcpResult.content?.[0]?.text
     if (!textContent) return []
 
+    // memory_recall 返回的 memories 是 []SearchResult，每项形如:
+    // { entry: { id, text, memory_type, importance, ... }, score }
     const parsed = JSON.parse(textContent) as {
-      memories: Array<{ id: string; content: string; memory_type: string; importance: number }>
+      memories: Array<{ entry: { id: string; text: string; memory_type: string; importance: number }; score: number }>
     }
 
     return parsed.memories.map((m) => ({
-      id: m.id,
-      content: m.content,
-      score: m.importance,
-      metadata: { type: m.memory_type },
+      id: m.entry.id,
+      content: m.entry.text,
+      score: m.score,
+      metadata: { type: m.entry.memory_type, importance: m.entry.importance },
     }))
   }
 

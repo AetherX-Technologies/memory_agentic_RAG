@@ -39,25 +39,22 @@ CREATE TABLE IF NOT EXISTS vectors (
 );
 `
 
+	// FTS5 with unicode61 tokenizer.
+	// CJK text is pre-segmented into single characters before insertion,
+	// so unicode61 can match individual Chinese characters.
 	schemaFTS = `
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
     memory_id UNINDEXED,
     content,
-    tokenize='simple'
+    tokenize='unicode61'
 );
 `
 
+	// Triggers removed — FTS insertion is now handled in Go code
+	// to support CJK character segmentation before indexing.
 	schemaTriggers = `
-CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO fts_memories(memory_id, content) VALUES (new.id, new.text);
-END;
-
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
     DELETE FROM fts_memories WHERE memory_id = old.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-    UPDATE fts_memories SET content = new.text WHERE memory_id = new.id;
 END;
 `
 

@@ -174,19 +174,31 @@ func initSchema(db *sql.DB) error {
 		}
 	}
 
-	// FTS5 with tokenizer fallback: try 'simple' (Chinese), fall back to 'unicode61' (built-in)
+	// FTS5: drop and recreate with unicode61 + rebuild index with CJK segmentation.
+	// Old tables may use 'simple' tokenizer which requires an external extension.
+	db.Exec("DROP TABLE IF EXISTS fts_memories")
+	db.Exec("DROP TRIGGER IF EXISTS memories_ai")
+	db.Exec("DROP TRIGGER IF EXISTS memories_au")
+
 	if _, err := db.Exec(schemaFTS); err != nil {
-		ftsUnicode := `CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
-			memory_id UNINDEXED, content, tokenize='unicode61');`
-		if _, err2 := db.Exec(ftsUnicode); err2 != nil {
-			return fmt.Errorf("FTS5 unavailable (tried 'simple' and 'unicode61'): %w", err2)
-		}
-		fmt.Fprintf(os.Stderr, "warning: FTS5 using unicode61 fallback tokenizer (Chinese segmentation degraded)\n")
+		return fmt.Errorf("FTS5 create failed: %w", err)
 	}
 
-	// FTS triggers
+	// Delete trigger only (insert/update handled in Go for CJK segmentation)
 	if _, err := db.Exec(schemaTriggers); err != nil {
 		return err
+	}
+
+	// Rebuild FTS index from existing memories with CJK segmentation
+	rows, err := db.Query("SELECT id, text FROM memories WHERE deleted_at = 0 AND expired = 0")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id, text string
+			if err := rows.Scan(&id, &text); err == nil {
+				db.Exec("INSERT OR IGNORE INTO fts_memories(memory_id, content) VALUES (?, ?)", id, segmentCJK(text))
+			}
+		}
 	}
 
 	// 执行层次字段迁移
@@ -278,7 +290,39 @@ func (s *sqliteStore) Insert(memory *Memory) (string, error) {
 		}
 	}
 
+	// Insert into FTS with CJK character segmentation
+	segmented := segmentCJK(memory.Text)
+	_, err = tx.Exec(`INSERT INTO fts_memories(memory_id, content) VALUES (?, ?)`, memory.ID, segmented)
+	if err != nil {
+		// FTS insert failure is non-fatal (search degrades but store works)
+		fmt.Fprintf(os.Stderr, "[store] FTS insert warning: %v\n", err)
+	}
+
 	return memory.ID, tx.Commit()
+}
+
+// segmentCJK inserts spaces around CJK characters for FTS5 indexing.
+func segmentCJK(text string) string {
+	var buf strings.Builder
+	buf.Grow(len(text) * 2)
+	for _, r := range text {
+		if isCJKCharStore(r) {
+			buf.WriteRune(' ')
+			buf.WriteRune(r)
+			buf.WriteRune(' ')
+		} else {
+			buf.WriteRune(r)
+		}
+	}
+	return buf.String()
+}
+
+func isCJKCharStore(r rune) bool {
+	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified
+		(r >= 0x3400 && r <= 0x4DBF) || // Extension A
+		(r >= 0x20000 && r <= 0x2A6DF) || // Extension B
+		(r >= 0xF900 && r <= 0xFAFF) || // Compatibility
+		(r >= 0x3000 && r <= 0x303F) // Symbols
 }
 
 func (s *sqliteStore) Get(id string) (*Memory, error) {

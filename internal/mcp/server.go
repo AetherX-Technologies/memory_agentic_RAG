@@ -5,11 +5,14 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
@@ -58,31 +61,107 @@ func New(s store.Store, embedder store.Embedder, cfg Config, cons ...*consolidat
 	return srv
 }
 
-// Run starts the MCP server, reading JSON-RPC from stdin and writing to stdout.
+// Run starts the MCP server using standard MCP stdio framing (Content-Length headers).
+// Also supports legacy newline-delimited JSON for backward compatibility with Claude Code.
 func (s *Server) Run(ctx context.Context) error {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024) // 64MB max for large imports
-	writer := json.NewEncoder(os.Stdout)
+	reader := bufio.NewReader(os.Stdin)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
+	for {
+		// Peek at the first bytes to detect framing mode
+		peek, err := reader.Peek(1)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		var body []byte
+		if peek[0] == 'C' || peek[0] == 'c' {
+			// Content-Length framing (standard MCP stdio)
+			body, err = readContentLengthMessage(reader)
+		} else if peek[0] == '{' {
+			// Legacy newline-delimited JSON
+			body, err = readLineMessage(reader)
+		} else {
+			// Skip unexpected bytes (blank lines, etc)
+			reader.ReadByte()
+			continue
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if len(body) == 0 {
 			continue
 		}
 
 		var req JSONRPCRequest
-		if err := json.Unmarshal(line, &req); err != nil {
-			s.writeError(writer, nil, -32700, "Parse error")
+		if err := json.Unmarshal(body, &req); err != nil {
+			s.writeContentLength(os.Stdout, &JSONRPCResponse{
+				JSONRPC: "2.0",
+				Error:   &JSONRPCError{Code: -32700, Message: "Parse error"},
+			})
 			continue
 		}
 
 		resp := s.handleRequest(ctx, &req)
 		if resp != nil {
-			writer.Encode(resp)
+			s.writeContentLength(os.Stdout, resp)
 		}
 	}
+}
 
-	return scanner.Err()
+// readContentLengthMessage reads a message framed with Content-Length header.
+func readContentLengthMessage(reader *bufio.Reader) ([]byte, error) {
+	// Read headers until empty line
+	contentLength := 0
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break // end of headers
+		}
+		if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+			val := strings.TrimSpace(line[len("content-length:"):])
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid Content-Length: %s", val)
+			}
+			contentLength = n
+		}
+	}
+	if contentLength <= 0 {
+		return nil, nil
+	}
+	body := make([]byte, contentLength)
+	_, err := io.ReadFull(reader, body)
+	return body, err
+}
+
+// readLineMessage reads a single line (newline-delimited JSON).
+func readLineMessage(reader *bufio.Reader) ([]byte, error) {
+	line, err := reader.ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return nil, err
+	}
+	return bytes.TrimRight(line, "\r\n"), nil
+}
+
+// writeContentLength writes a JSON-RPC response with Content-Length framing.
+func (s *Server) writeContentLength(w io.Writer, resp *JSONRPCResponse) {
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "Content-Length: %d\r\n\r\n", len(body))
+	w.Write(body)
 }
 
 // RunWithIO runs the server with custom reader/writer (for testing).

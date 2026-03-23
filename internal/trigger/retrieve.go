@@ -27,10 +27,10 @@ var skipPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)^(hi|hello|hey|你好|嗨|早上好|晚上好|good\s*(morning|afternoon|evening))\b`),
 	// Shell commands
 	regexp.MustCompile(`(?i)^(run|build|test|ls|cd|git|npm|pip|docker|curl|grep|find|make|sudo)\b`),
-	// Confirmations
-	regexp.MustCompile(`(?i)^(yes|no|yep|nope|ok|okay|sure|fine|好的|是的|不是|继续|嗯)\s*[.!]?$`),
+	// Confirmations & acknowledgements
+	regexp.MustCompile(`(?i)^(yes|no|yep|nope|ok|okay|sure|fine|好的|是的|不是|继续|嗯|谢谢|再见|拜拜|thx|bye|thanks|thank you)\s*[.!。！]?$`),
 	// Action directives
-	regexp.MustCompile(`(?i)^(go ahead|continue|proceed|do it|start|begin|next|实施|开始|继续)\s*[.!]?$`),
+	regexp.MustCompile(`(?i)^(go ahead|continue|proceed|do it|start|begin|next|实施|开始|继续)\s*[.!。！]?$`),
 	// Pure emoji (Unicode ranges — Go regexp doesn't support \p{Emoji})
 	regexp.MustCompile(`^[\x{1F300}-\x{1F9FF}\x{2600}-\x{27BF}\x{FE00}-\x{FE0F}\x{200D}\s]+$`),
 	// Slash commands

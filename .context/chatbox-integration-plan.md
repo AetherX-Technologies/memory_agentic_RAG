@@ -21,10 +21,23 @@
 
 ### 关键发现
 
-1. **已有 MCP 支持** — Chatbox 已集成 MCP stdio 传输，可直接连接 hybridmem-mcp
+1. **已有 MCP 支持** — Chatbox 已集成 MCP stdio 传输（`@modelcontextprotocol/sdk`），与 hybridmem-mcp 的 newline-delimited JSON-RPC 兼容（均遵循 MCP stdio 规范）
 2. **已有 RAG 基础设施** — Knowledge Base 系统支持文件嵌入 + 向量检索
 3. **系统提示注入点明确** — `injectModelSystemPrompt()` 是注入记忆的最佳位置
 4. **上下文压缩 = 记忆候选** — 压缩摘要已经是 LLM 生成的高质量内容
+
+### MCP 传输兼容性说明
+
+hybridmem-mcp 使用 **newline-delimited JSON-RPC 2.0 over stdio**，这是 MCP 标准 stdio 传输格式。服务端实现以下 MCP 生命周期方法：
+
+| 方法 | 说明 |
+|------|------|
+| `initialize` | 返回 protocolVersion `2024-11-05`、capabilities、serverInfo |
+| `notifications/initialized` | 静默接收，不返回响应 |
+| `tools/list` | 返回 8 个工具定义 |
+| `tools/call` | 执行工具并返回 `{ content: [{ type: "text", text: "..." }] }` |
+
+Chatbox 的 `@modelcontextprotocol/sdk` 使用同一 stdio 传输协议，无需额外适配层。
 
 ---
 
@@ -45,7 +58,7 @@ Chatbox ──MCP stdio──→ hybridmem-mcp ──→ SQLite 记忆库
 **工作流**：
 1. 用户对话时，Claude/GPT 自动调用 `memory_store` 存储记忆
 2. 需要回忆时，Claude/GPT 调用 `memory_recall` 检索
-3. 记忆合并通过 `memory_consolidate` 手动或定时触发
+3. 记忆合并通过 `memory_consolidate` 触发（**前提**：MCP Server 启动时需配置 `MEMORY_LLM_KEY` 环境变量，否则该工具返回 "consolidation unavailable — no LLM configured"）
 
 **优点**：
 - 零侵入，不改 Chatbox 任何代码
@@ -79,9 +92,9 @@ Chatbox ──MCP stdio──→ hybridmem-mcp ──→ SQLite 记忆库
 async function injectModelSystemPrompt(messages, settings, sessionSettings) {
   // 原有逻辑...
 
-  // 新增：注入记忆上下文
+  // 新增：注入记忆上下文（取最新一条 user 消息作为检索 query）
   if (settings.memoryEnabled) {
-    const userMessage = messages.find(m => m.role === 'user')?.content
+    const userMessage = messages.findLast(m => m.role === 'user')?.content
     const memories = await memoryService.recall(userMessage, { limit: 5, maxTokens: 500 })
     if (memories.context) {
       systemPrompt += '\n\n' + memories.context
@@ -138,12 +151,25 @@ Chatbox KB 系统
 // 新增 MemoryKnowledgeBase 实现 KnowledgeBaseController
 class MemoryKnowledgeBase implements KnowledgeBaseController {
   async search(query: string, limit: number): Promise<KBResult[]> {
-    // 调用 hybridmem-mcp 的 memory_recall
-    return await mcpClient.callTool('memory_recall', { query, limit })
+    // callTool 返回 MCP 格式: { content: [{ type: "text", text: "..." }] }
+    // text 内容为 JSON 字符串，需要解析并映射到 KBResult[]
+    const mcpResult = await mcpClient.callTool('memory_recall', { query, limit })
+    const textContent = mcpResult.content?.[0]?.text
+    if (!textContent) return []
+
+    const parsed = JSON.parse(textContent) as {
+      memories: Array<{ id: string; content: string; memory_type: string; importance: number }>
+    }
+
+    return parsed.memories.map((m) => ({
+      id: m.id,
+      content: m.content,
+      score: m.importance,
+      metadata: { type: m.memory_type },
+    }))
   }
 
   async ingest(text: string, source: string): Promise<void> {
-    // 调用 memory_store
     await mcpClient.callTool('memory_store', { content: text, type: 'episode' })
   }
 }
@@ -371,10 +397,14 @@ Chatbox 设置 → MCP 服务器 → 添加：
   "name": "Memory System",
   "command": "/path/to/hybridmem-mcp",
   "env": {
-    "MEMORY_DB_PATH": "~/Library/Application Support/chatbox/memory.db"
+    "MEMORY_DB_PATH": "/Users/<username>/Library/Application Support/chatbox/memory.db",
+    "MEMORY_LLM_KEY": "<可选，填入后启用 memory_consolidate>"
   }
 }
 ```
+
+> **注意**：`MEMORY_DB_PATH` 必须使用绝对路径，不可使用 `~`（shell 波浪线扩展在 JSON 配置中不生效）。
+> `MEMORY_LLM_KEY` 为可选项，配置后 `memory_consolidate` 工具才可用（否则返回 "consolidation unavailable"）。
 
 ### 5.3 测试
 

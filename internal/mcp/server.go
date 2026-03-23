@@ -79,14 +79,13 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		var body []byte
+		useCL := false // use Content-Length framing for response?
 		if peek[0] == 'C' || peek[0] == 'c' {
-			// Content-Length framing (standard MCP stdio)
 			body, err = readContentLengthMessage(reader)
+			useCL = true
 		} else if peek[0] == '{' {
-			// Newline-delimited JSON input (Chatbox sends this way)
 			body, err = readLineMessage(reader)
 		} else {
-			// Skip unexpected bytes (blank lines, etc)
 			reader.ReadByte()
 			continue
 		}
@@ -96,17 +95,17 @@ func (s *Server) Run(ctx context.Context) error {
 				return nil
 			}
 			if _, fatal := err.(*fatalFrameError); fatal {
-				s.writeContentLength(os.Stdout, &JSONRPCResponse{
+				s.writeResp(os.Stdout, &JSONRPCResponse{
 					JSONRPC: "2.0",
 					Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
-				})
-				fmt.Fprintf(os.Stderr, "[memory] fatal frame error, closing session: %v\n", err)
+				}, useCL)
+				fmt.Fprintf(os.Stderr, "[memory] fatal frame error: %v\n", err)
 				return nil
 			}
-			s.writeContentLength(os.Stdout, &JSONRPCResponse{
+			s.writeResp(os.Stdout, &JSONRPCResponse{
 				JSONRPC: "2.0",
 				Error:   &JSONRPCError{Code: -32700, Message: err.Error()},
-			})
+			}, useCL)
 			continue
 		}
 		if len(body) == 0 {
@@ -117,18 +116,17 @@ func (s *Server) Run(ctx context.Context) error {
 
 		var req JSONRPCRequest
 		if err := json.Unmarshal(body, &req); err != nil {
-			s.writeContentLength(os.Stdout, &JSONRPCResponse{
+			s.writeResp(os.Stdout, &JSONRPCResponse{
 				JSONRPC: "2.0",
 				Error:   &JSONRPCError{Code: -32700, Message: "Parse error"},
-			})
+			}, useCL)
 			continue
 		}
 
 		resp := s.handleRequest(ctx, &req)
 		if resp != nil {
-			respBytes, _ := json.Marshal(resp)
-			fmt.Fprintf(os.Stderr, "[mcp] send %d bytes for method=%s id=%v\n", len(respBytes), req.Method, req.ID)
-			s.writeContentLength(os.Stdout, resp)
+			fmt.Fprintf(os.Stderr, "[mcp] send method=%s id=%v cl=%v\n", req.Method, req.ID, useCL)
+			s.writeResp(os.Stdout, resp, useCL)
 		}
 	}
 }
@@ -180,6 +178,15 @@ func readLineMessage(reader *bufio.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimRight(line, "\r\n"), nil
+}
+
+// writeResp dispatches to the correct framing based on how the request was received.
+func (s *Server) writeResp(w io.Writer, resp *JSONRPCResponse, useContentLength bool) {
+	if useContentLength {
+		s.writeContentLength(w, resp)
+	} else {
+		s.writeLineJSON(w, resp)
+	}
 }
 
 // writeLineJSON writes a JSON-RPC response as a single line (legacy mode).

@@ -200,30 +200,31 @@ func readLineMessage(reader *bufio.Reader) ([]byte, error) {
 
 // writeLineJSON writes a JSON-RPC response as a single line (legacy mode).
 func (s *Server) writeLineJSON(w io.Writer, resp *JSONRPCResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	body, err := json.Marshal(resp)
 	if err != nil {
 		return
 	}
-	// Single atomic write to prevent partial reads
-	buf := make([]byte, 0, len(body)+1)
-	buf = append(buf, body...)
-	buf = append(buf, '\n')
-	w.Write(buf)
+	bw := bufio.NewWriter(w)
+	bw.Write(body)
+	bw.WriteByte('\n')
+	bw.Flush()
 }
 
 // writeContentLength writes a JSON-RPC response with Content-Length framing.
-// Uses a single write to prevent the client from reading partial data.
+// Uses buffered writer + Flush to ensure the client receives complete frames.
 func (s *Server) writeContentLength(w io.Writer, resp *JSONRPCResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	body, err := json.Marshal(resp)
 	if err != nil {
 		return
 	}
-	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
-	// Single atomic write: header + body together
-	buf := make([]byte, 0, len(header)+len(body))
-	buf = append(buf, header...)
-	buf = append(buf, body...)
-	w.Write(buf)
+	bw := bufio.NewWriter(w)
+	fmt.Fprintf(bw, "Content-Length: %d\r\n\r\n", len(body))
+	bw.Write(body)
+	bw.Flush()
 }
 
 // RunWithIO runs the server with custom reader/writer (for testing).

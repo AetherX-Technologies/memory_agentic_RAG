@@ -163,9 +163,13 @@ func (s *Server) handleMemoryRecall(ctx context.Context, params json.RawMessage)
 
 	// Auto-capture: if the query contains memory-worthy content, store it first.
 	// This enables "remember X" to work without a separate tool_call for memory_store.
+	// Skip if the query is a retrieval question (e.g. "你记得我的职业吗") to avoid
+	// polluting memory with transient prompts.
 	if shouldCapture, reason := trigger.ShouldCapture(p.Query); shouldCapture {
 		if isNoise, _ := trigger.IsNoise(p.Query); !isNoise {
-			go s.autoStore(p.Query, reason)
+			if !trigger.IsRetrievalQuestion(p.Query) {
+				s.autoStore(p.Query, reason) // synchronous to ensure it's stored before recall returns
+			}
 		}
 	}
 

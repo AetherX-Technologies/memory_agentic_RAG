@@ -1,11 +1,8 @@
 package mcp
 
-// toolDefinitions — only expose memory_recall to the LLM.
-// memory_store is handled automatically inside recall (via ShouldCapture).
-// Other tools (store, forget, update, export, import, etc.) remain functional
-// but are not listed to avoid triggering tool_call SSE issues with some LLM APIs.
-//
-// When env MEMORY_EXPOSE_ALL_TOOLS=1 is set, all 9 tools are exposed.
+// toolDefinitions — single-tool mode (opt-in via MEMORY_SINGLE_TOOL=1).
+// Only exposes memory_recall; auto-stores via ShouldCapture internally.
+// Use for LLM APIs whose SSE tool_call format is incompatible with some SDKs.
 var toolDefinitions = []map[string]interface{}{
 	{
 		"name": "memory_recall",

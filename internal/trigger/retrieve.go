@@ -21,6 +21,18 @@ var forceRetrievePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(我(说过|提到过|告诉过你))`),
 }
 
+// IsRetrievalQuestion returns true if the text is asking about past memories
+// rather than stating new information. Used to prevent auto-storing questions
+// like "你记得我的职业吗" as facts.
+func IsRetrievalQuestion(text string) bool {
+	for _, r := range forceRetrievePatterns {
+		if r.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
 // Skip patterns — queries that never need memory lookup.
 var skipPatterns = []*regexp.Regexp{
 	// Greetings

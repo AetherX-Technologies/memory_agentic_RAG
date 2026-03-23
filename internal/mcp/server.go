@@ -303,9 +303,11 @@ func (s *Server) handleInitialize(req *JSONRPCRequest) *JSONRPCResponse {
 }
 
 func (s *Server) handleToolsList(req *JSONRPCRequest) *JSONRPCResponse {
-	defs := toolDefinitions
-	if os.Getenv("MEMORY_EXPOSE_ALL_TOOLS") == "1" {
-		defs = allToolDefinitions
+	// Default: expose all tools. Single-tool mode (only memory_recall) for
+	// LLM providers whose SSE tool_call format is incompatible with some SDKs.
+	defs := allToolDefinitions
+	if os.Getenv("MEMORY_SINGLE_TOOL") == "1" {
+		defs = toolDefinitions
 	}
 	return &JSONRPCResponse{
 		JSONRPC: "2.0",

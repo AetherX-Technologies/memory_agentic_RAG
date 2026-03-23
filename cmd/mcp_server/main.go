@@ -57,10 +57,11 @@ func main() {
 	rerankCfg := store.DefaultRerankConfig()
 	rerankCfg.Enabled = false
 	rerankProvider := os.Getenv("MEMORY_RERANK_PROVIDER")
-	if rerankProvider != "" {
+	rerankKey := os.Getenv("MEMORY_RERANK_KEY")
+	if rerankProvider != "" && rerankKey != "" {
 		rerankCfg.Enabled = true
 		rerankCfg.Provider = rerankProvider
-		rerankCfg.APIKey = os.Getenv("MEMORY_RERANK_KEY")
+		rerankCfg.APIKey = rerankKey
 		switch rerankProvider {
 		case "jina":
 			rerankCfg.Model = envOr("MEMORY_RERANK_MODEL", "jina-reranker-v2-base-multilingual")
@@ -88,11 +89,12 @@ func main() {
 	// ── Embedding config ──
 	var embedder store.Embedder
 	embedProvider := os.Getenv("MEMORY_EMBED_PROVIDER")
-	if embedProvider != "" {
+	embedKey := os.Getenv("MEMORY_EMBED_KEY")
+	if embedProvider != "" && embedKey != "" {
 		cfg := store.EmbeddingConfig{
 			Enabled:  true,
 			Provider: embedProvider,
-			APIKey:   os.Getenv("MEMORY_EMBED_KEY"),
+			APIKey:   embedKey,
 			Timeout:  10,
 		}
 		switch embedProvider {

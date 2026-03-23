@@ -166,8 +166,9 @@ func readContentLengthMessage(reader *bufio.Reader) ([]byte, error) {
 		return nil, nil
 	}
 	if contentLength > maxContentLength {
-		// Drain the oversized body to keep the stream in sync, then return error
-		io.CopyN(io.Discard, reader, int64(contentLength))
+		// Cannot safely drain a huge body (client may not send all bytes, causing a hang).
+		// Return error immediately; the stream may be desynchronized, but the JSON-RPC
+		// error will reach the client for the next read, and the client should reconnect.
 		return nil, fmt.Errorf("Content-Length %d exceeds max %d", contentLength, maxContentLength)
 	}
 	body := make([]byte, contentLength)

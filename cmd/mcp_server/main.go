@@ -42,8 +42,9 @@ func main() {
 		}
 	}
 	if cfg == nil {
-		// Try default locations
-		for _, p := range []string{"config.yaml", filepath.Join(filepath.Dir(os.Args[0]), "config.yaml")} {
+		// Try default locations: binary dir first (stable), then CWD (dev convenience)
+		exeDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+		for _, p := range []string{filepath.Join(exeDir, "config.yaml"), "config.yaml"} {
 			if _, err := os.Stat(p); err == nil {
 				cfg, _ = config.Load(p)
 				if cfg != nil {
@@ -54,8 +55,23 @@ func main() {
 		}
 	}
 	if cfg == nil {
+		// No config file found — use defaults. applyDefaults is called inside Load,
+		// so we create a minimal config and apply defaults manually.
 		cfg = &config.AppConfig{}
-		config.Load("") // just to apply defaults — ignore error
+		cfg.Embedding.Provider = "" // env-only mode: no local model unless explicitly set
+		// Apply defaults for LLM/Rerank so env-only deployments work
+		cfg.LLM.Model = "gpt-4o"
+		cfg.LLM.Endpoint = "https://api.openai.com/v1/chat/completions"
+		cfg.LLM.Timeout = 30
+		cfg.Rerank.Model = "jina-reranker-v2-base-multilingual"
+		cfg.Rerank.Endpoint = "https://api.jina.ai/v1/rerank"
+		cfg.Rerank.Timeout = 5
+		cfg.Rerank.BlendWeight = 0.6
+		cfg.Rerank.MaxCandidates = 50
+		cfg.Rerank.MaxDocLength = 2000
+		cfg.Rerank.UnreturnedPenalty = 0.8
+		cfg.Rerank.MinBlendedScore = 0.5
+		fmt.Fprintf(os.Stderr, "[memory] no config.yaml found, using env-only mode\n")
 	}
 
 	// ── DB path (env overrides config) ──
@@ -69,7 +85,9 @@ func main() {
 	rerankKey := envOr("MEMORY_RERANK_KEY", cfg.Rerank.APIKey)
 	storeCfg := cfg.ToStoreConfig()
 	storeCfg.DBPath = dbPath
-	if rerankProvider != "" && rerankKey != "" {
+	// Only enable reranking if: provider+key present AND config doesn't explicitly disable it
+	rerankExplicitlyDisabled := configPath != "" && !cfg.Rerank.Enabled && os.Getenv("MEMORY_RERANK_PROVIDER") == ""
+	if rerankProvider != "" && rerankKey != "" && !rerankExplicitlyDisabled {
 		storeCfg.RerankConfig.Enabled = true
 		storeCfg.RerankConfig.Provider = rerankProvider
 		storeCfg.RerankConfig.APIKey = rerankKey
@@ -132,11 +150,15 @@ func main() {
 			}
 			switch embedProvider {
 			case "jina":
-				apiCfg.Model = envOr("MEMORY_EMBED_MODEL", cfg.Embedding.Jina.Model)
-				apiCfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", cfg.Embedding.Jina.Endpoint)
+				m := cfg.Embedding.Jina.Model; if m == "" { m = "jina-embeddings-v3" }
+				e := cfg.Embedding.Jina.Endpoint; if e == "" { e = "https://api.jina.ai/v1/embeddings" }
+				apiCfg.Model = envOr("MEMORY_EMBED_MODEL", m)
+				apiCfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", e)
 			case "openai":
-				apiCfg.Model = envOr("MEMORY_EMBED_MODEL", cfg.Embedding.OpenAI.Model)
-				apiCfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", cfg.Embedding.OpenAI.Endpoint)
+				m := cfg.Embedding.OpenAI.Model; if m == "" { m = "text-embedding-3-small" }
+				e := cfg.Embedding.OpenAI.Endpoint; if e == "" { e = "https://api.openai.com/v1/embeddings" }
+				apiCfg.Model = envOr("MEMORY_EMBED_MODEL", m)
+				apiCfg.Endpoint = envOr("MEMORY_EMBED_ENDPOINT", e)
 			}
 			emb = store.NewEmbedder(apiCfg)
 			fmt.Fprintf(os.Stderr, "[memory] embedding: %s/%s\n", embedProvider, apiCfg.Model)
@@ -163,6 +185,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[memory] LLM: %s @ %s\n", llmModel, llmEndpoint)
 	} else {
 		fmt.Fprintf(os.Stderr, "[memory] LLM: disabled\n")
+	}
+
+	// Ensure local embedder is cleaned up on exit
+	if localEmb, ok := emb.(*embedder.LocalEmbedder); ok {
+		defer localEmb.Close()
 	}
 
 	srv := mcp.New(st, emb, mcp.DefaultConfig(), cons)

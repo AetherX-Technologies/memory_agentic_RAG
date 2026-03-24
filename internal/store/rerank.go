@@ -74,7 +74,9 @@ func NewReranker(config RerankConfig) Reranker {
 	}
 
 	switch config.Provider {
-	case ProviderJina:
+	case ProviderJina, "openai":
+		// Both Jina and OpenAI-compatible rerank APIs use the same request format
+		// (query + documents + top_n), so share the same implementation.
 		return &jinaReranker{config: config, client: client}
 	default:
 		return &noopReranker{}

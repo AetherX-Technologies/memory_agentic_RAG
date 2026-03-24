@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -132,6 +133,7 @@ func (r *jinaReranker) Rerank(query string, results []SearchResult) ([]SearchRes
 }
 
 func (r *jinaReranker) callJinaAPI(query string, docs []string) ([]RerankResult, error) {
+	start := time.Now()
 	reqBody := map[string]interface{}{
 		"model":     r.config.Model,
 		"query":     query,
@@ -152,8 +154,28 @@ func (r *jinaReranker) callJinaAPI(query string, docs []string) ([]RerankResult,
 	req.Header.Set("Authorization", "Bearer "+r.config.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
+	fmt.Fprintf(
+		os.Stderr,
+		"[memory] rerank request provider=%s model=%s endpoint=%s docs=%d query_chars=%d\n",
+		r.config.Provider,
+		r.config.Model,
+		r.config.Endpoint,
+		len(docs),
+		len([]rune(query)),
+	)
+
 	resp, err := r.client.Do(req)
 	if err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"[memory] rerank transport_error provider=%s model=%s endpoint=%s docs=%d dur_ms=%d err=%v\n",
+			r.config.Provider,
+			r.config.Model,
+			r.config.Endpoint,
+			len(docs),
+			time.Since(start).Milliseconds(),
+			err,
+		)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -164,6 +186,16 @@ func (r *jinaReranker) callJinaAPI(query string, docs []string) ([]RerankResult,
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(
+			os.Stderr,
+			"[memory] rerank response provider=%s model=%s status=%d docs=%d dur_ms=%d body_bytes=%d\n",
+			r.config.Provider,
+			r.config.Model,
+			resp.StatusCode,
+			len(docs),
+			time.Since(start).Milliseconds(),
+			len(data),
+		)
 		return nil, fmt.Errorf("jina API error: %d, body: %s", resp.StatusCode, string(data))
 	}
 
@@ -187,6 +219,18 @@ func (r *jinaReranker) callJinaAPI(query string, docs []string) ([]RerankResult,
 			RelevanceScore: r.RelevanceScore,
 		}
 	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"[memory] rerank response provider=%s model=%s status=%d docs=%d results=%d dur_ms=%d body_bytes=%d\n",
+		r.config.Provider,
+		r.config.Model,
+		resp.StatusCode,
+		len(docs),
+		len(results),
+		time.Since(start).Milliseconds(),
+		len(data),
+	)
 
 	return results, nil
 }

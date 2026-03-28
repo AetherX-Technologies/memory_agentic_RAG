@@ -3,12 +3,16 @@ package store
 import (
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 )
 
 const (
-	BM25BoostFactor     = 0.15 // BM25命中加成15%
-	CandidateMultiplier = 2    // 候选池倍数
+	CandidateMultiplier = 3    // 候选池倍数（增大以给 RRF 更多候选）
+	VectorRRFWeight     = 0.55 // 向量检索在 RRF 中的权重（略高于 BM25）
+	BM25RRFWeight       = 0.45 // BM25 在 RRF 中的权重
+	rrfK                = 60   // RRF 融合常数
+	vectorMinCosine     = 0.1  // 向量候选最低余弦相似度（低于此值不参与 RRF）
 )
 
 // HybridSearch 混合检索：向量 + BM25 + RRF 融合 + 重排
@@ -84,39 +88,60 @@ func (s *sqliteStore) HybridSearch(queryVector []float32, queryText string, limi
 	return topK(fused, limit), nil
 }
 
-// fuseResults 融合向量和 BM25 结果
+// fuseResults 使用加权 RRF（Reciprocal Rank Fusion）融合向量和 BM25 结果。
+// 融合后分数归一化到 [0, 1]，兼容下游 MMR 评分。
+// 低质量向量候选（余弦相似度 < vectorMinCosine）不参与排名。
 func fuseResults(vectorResults, bm25Results []SearchResult, limit int) []SearchResult {
-	vectorMap := make(map[string]SearchResult, len(vectorResults))
-	bm25Map := make(map[string]bool, len(bm25Results))
+	scoreMap := make(map[string]float64)
+	memoryMap := make(map[string]SearchResult)
 
+	// 向量结果：过滤低质量候选后按排名贡献 RRF 分数
+	// 如果过滤后无结果且 BM25 也为空，回退到未过滤的向量结果
+	rank := 0
 	for _, r := range vectorResults {
-		vectorMap[r.Entry.ID] = r
-	}
-
-	for _, r := range bm25Results {
-		bm25Map[r.Entry.ID] = true
-	}
-
-	// 融合分数：向量分数为基础，BM25 命中加成
-	fused := make([]SearchResult, 0, len(vectorResults)+len(bm25Results))
-	for id, vr := range vectorMap {
-		score := vr.Score
-		if bm25Map[id] {
-			score = score + (BM25BoostFactor * score)
-			if score > MaxScore {
-				score = MaxScore
-			}
+		if r.Score < vectorMinCosine {
+			continue
 		}
+		scoreMap[r.Entry.ID] += VectorRRFWeight / float64(rrfK+rank+1)
+		memoryMap[r.Entry.ID] = r
+		rank++
+	}
+	if rank == 0 && len(bm25Results) == 0 {
+		// ��有向量候选都低于门槛且无 BM25 结果，回退到未过滤向量
+		for rank, r := range vectorResults {
+			scoreMap[r.Entry.ID] += VectorRRFWeight / float64(rrfK+rank+1)
+			memoryMap[r.Entry.ID] = r
+		}
+	}
+
+	// BM25 结果按排名贡献 RRF 分数
+	for rank, r := range bm25Results {
+		scoreMap[r.Entry.ID] += BM25RRFWeight / float64(rrfK+rank+1)
+		if _, exists := memoryMap[r.Entry.ID]; !exists {
+			memoryMap[r.Entry.ID] = r
+		}
+	}
+
+	fused := make([]SearchResult, 0, len(scoreMap))
+	for id, score := range scoreMap {
+		sr := memoryMap[id]
 		fused = append(fused, SearchResult{
-			Entry: vr.Entry,
+			Entry: sr.Entry,
 			Score: score,
 		})
 	}
 
-	// BM25-only 结果
-	for _, br := range bm25Results {
-		if _, exists := vectorMap[br.Entry.ID]; !exists {
-			fused = append(fused, br)
+	sort.Slice(fused, func(i, j int) bool {
+		return fused[i].Score > fused[j].Score
+	})
+
+	// 归一化分数到 [0, 1]，使下游 MMR 的 lambda*score 和 (1-lambda)*similarity 量级匹配
+	if len(fused) > 0 {
+		maxScore := fused[0].Score
+		if maxScore > 0 {
+			for i := range fused {
+				fused[i].Score /= maxScore
+			}
 		}
 	}
 

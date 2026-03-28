@@ -191,29 +191,54 @@ func (s *sqliteStore) bm25SearchInLevel(query string, level string, limit int, s
 	return results, nil
 }
 
-// rrfFusion RRF融合算法
+// rrfFusion 加权 RRF 融合算法（与 HybridSearch 保持一致的权重和归一化）
 func rrfFusion(vectorResults, bm25Results []SearchResult) []SearchResult {
 	scoreMap := make(map[string]float64)
-	memoryMap := make(map[string]Memory)
+	memoryMap := make(map[string]SearchResult)
 
-	for rank, r := range vectorResults {
-		scoreMap[r.Entry.ID] += 1.0 / float64(rrfConstantK+rank+1)
-		memoryMap[r.Entry.ID] = r.Entry
+	// 向量结果：过滤低质量候选
+	rank := 0
+	for _, r := range vectorResults {
+		if r.Score < vectorMinCosine {
+			continue
+		}
+		scoreMap[r.Entry.ID] += VectorRRFWeight / float64(rrfConstantK+rank+1)
+		memoryMap[r.Entry.ID] = r
+		rank++
+	}
+	if rank == 0 && len(bm25Results) == 0 {
+		for rank, r := range vectorResults {
+			scoreMap[r.Entry.ID] += VectorRRFWeight / float64(rrfConstantK+rank+1)
+			memoryMap[r.Entry.ID] = r
+		}
 	}
 
 	for rank, r := range bm25Results {
-		scoreMap[r.Entry.ID] += 1.0 / float64(rrfConstantK+rank+1)
-		memoryMap[r.Entry.ID] = r.Entry
+		scoreMap[r.Entry.ID] += BM25RRFWeight / float64(rrfConstantK+rank+1)
+		if _, exists := memoryMap[r.Entry.ID]; !exists {
+			memoryMap[r.Entry.ID] = r
+		}
 	}
 
 	var results []SearchResult
 	for id, score := range scoreMap {
-		results = append(results, SearchResult{Entry: memoryMap[id], Score: score})
+		sr := memoryMap[id]
+		results = append(results, SearchResult{Entry: sr.Entry, Score: score})
 	}
 
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score > results[j].Score
 	})
+
+	// 归一化分数到 [0, 1]
+	if len(results) > 0 {
+		maxScore := results[0].Score
+		if maxScore > 0 {
+			for i := range results {
+				results[i].Score /= maxScore
+			}
+		}
+	}
 
 	return results
 }

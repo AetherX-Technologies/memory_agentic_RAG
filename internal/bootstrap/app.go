@@ -73,7 +73,7 @@ func Load() (*App, error) {
 		app.closeFuncs = append(app.closeFuncs, closeEmbedder)
 	}
 
-	// Load FastText should_capture model (optional — falls back to rules if missing)
+	// Load FastText should_capture model (required)
 	ftPath := envOr("MEMORY_FASTTEXT_MODEL", "models/should_capture_best.ftz")
 	if !filepath.IsAbs(ftPath) {
 		exeDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -82,8 +82,10 @@ func Load() (*App, error) {
 		}
 	}
 	if err := trigger.InitFastText(ftPath); err != nil {
-		fmt.Fprintf(os.Stderr, "[memory] fasttext: not loaded (%v), using rule-based capture\n", err)
-	} else {
+		_ = app.Close()
+		return nil, fmt.Errorf("failed to load fasttext model: %w", err)
+	}
+	{
 		app.closeFuncs = append(app.closeFuncs, func() error {
 			trigger.CloseFastText()
 			return nil

@@ -1,314 +1,190 @@
 # HybridMem-RAG
 
-> **生产级混合检索系统，支持可配置的搜索模式**
-> 纯 Go 实现 • 跨平台 • 高性能
+> **AI Agent 记忆系统，从被动检索到主动知识合成**
+> 纯 Go • MCP + HTTP Tool API • 跨平台 • 10k memories in 39ms
 
-[English](./README.md) | [架构文档](./docs/architecture/INDEX.md) | [API 参考](./docs/API.md)
-
----
-
-## 🚀 什么是 HybridMem-RAG？
-
-HybridMem-RAG 是一个先进的检索增强生成（RAG）系统，结合多种搜索策略以提供高精度结果。完全使用 Go 语言构建，零 CGO 依赖，可在 Windows、macOS、Linux、iOS 和 Android 上无缝运行。
-
-### 核心创新
-
-**🎯 三种可配置检索模式**
-- **模式 1**：纯 BM25 关键词搜索（最快，<500µs）
-- **模式 2**：混合搜索（BM25 + 向量 + RRF 融合）
-- **模式 3**：完整管道（混合 + 重排，92% 准确率）
-
-**🧠 分层检索架构**
-- 受 OpenViking 文件系统感知检索启发
-- 逐层搜索，加权聚合
-- 基于文档层次结构的上下文感知结果
-
-**⚡ 高性能设计**
-- SQLite FTS5 + 自定义中文分词器
-- 并行向量搜索 + SIMD 优化
-- RRF（倒数排名融合）分数混合
-- 12 阶段评分管道 + 重排
-
-**🔧 生产就绪特性**
-- 支持 OpenAI 兼容的嵌入 API
-- 支持 Jina 兼容的重排 API
-- 通过 YAML 配置（无需修改代码）
-- 真实场景综合测试套件
+[English](./README.md) | [HTTP API](./docs/API.md) | [使用指南](./docs/USAGE_GUIDE.md) | [架构文档](./docs/architecture/INDEX.md)
 
 ---
 
-## 📊 性能基准
+## 项目定位
 
-| 数据集大小 | 模式 1 (BM25) | 模式 2 (混合) | 模式 3 (完整) |
-|-----------|---------------|--------------|--------------|
-| 1,000 文档 | <1ms         | ~50ms        | ~200ms       |
-| 10,000 文档| <1ms         | ~100ms       | ~300ms       |
-| **准确率** | 60-70%       | 75-85%       | **90-95%**   |
+HybridMem-RAG 是一个长期记忆后端，给大模型或 AI Agent 提供：
 
-*在包含 10 个复杂查询的真实中文文档语料库上测试*
+- 记忆存储
+- 记忆召回
+- 去重与冲突控制
+- 软删除与恢复
+- 导入导出
+- 合并洞察
+
+它当前支持两种接入方式：
+
+- `MCP`
+  适合 Claude Code、Chatbox 等 MCP 客户端
+- `HTTP`
+  适合本地服务、浏览器插件和自定义 Agent 编排
 
 ---
 
-## 🎯 快速开始
+## 核心能力
 
-### 安装
+| 能力 | 说明 |
+|---|---|
+| 记忆存储 | 支持 fact、preference、skill、episode、instruction、relationship |
+| 智能去重 | `content_hash` 去重，支持语义召回链路 |
+| 混合检索 | BM25 + 向量 + **加权 RRF 融合** + rerank + MMR + CJK 停用词优化 |
+| 自动触发 | **FastText ML 分类器** (CJK/EN 双模型, 98%+) + `ShouldRetrieve` 自适应跳过 |
+| 噪音过滤 | 过滤 AI 否认、元问题、样板文本 |
+| 记忆合并 | LLM 发现模式、洞察和连接关系 |
+| MCP 工具 | 9 个工具，stdio JSON-RPC |
+| HTTP Tool API | `/api/v1/tools`、`/api/v1/tools/call`、`/api/v1/tools/{name}` |
+| Legacy REST | 兼容旧接入，保留 `/api/memories/*` |
+
+---
+
+## 快速开始
+
+### 1. 编译
 
 ```bash
 git clone https://github.com/AetherX-Technologies/memory_agentic_RAG.git
 cd memory_agentic_RAG
-go mod download
+
+# 首次需要编译 FastText C++ 库
+git clone --depth 1 https://github.com/facebookresearch/fastText.git /tmp/fasttext
+cd /tmp/fasttext && mkdir build && cd build && cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make -j$(nproc)
+cp /tmp/fasttext/build/libfasttext_pic.a /path/to/memory_agentic_RAG/internal/fasttext/lib/libfasttext.a
+
+# 编译
+CGO_ENABLED=1 go build -tags fts5 -o hybridmem-mcp ./cmd/mcp_server/
+CGO_ENABLED=1 go build -tags fts5 -o hybridmem-server ./cmd/server/
 ```
 
-### 配置
-
-复制示例配置并添加你的 API 密钥：
+### 2. 运行 MCP
 
 ```bash
-cd cmd/real_world_test
-cp config.yaml.example config.yaml
-# 编辑 config.yaml 填入你的 API 凭证
+MEMORY_DB_PATH=./memory.db ./hybridmem-mcp
 ```
 
-**config.yaml 结构：**
-
-```yaml
-retrieval_mode: 3  # 1=BM25, 2=混合, 3=完整
-
-embedding:
-  enabled: true
-  provider: "openai"
-  api_key: "你的API密钥"
-  model: "text-embedding-3-small"
-  endpoint: "https://api.openai.com/v1/embeddings"
-  dimension: 1536
-
-rerank:
-  enabled: true
-  provider: "jina"
-  api_key: "你的API密钥"
-  model: "jina-reranker-v2-base-multilingual"
-  endpoint: "https://api.jina.ai/v1/rerank"
-```
-
-### 运行测试
+### 3. 运行 HTTP
 
 ```bash
-# 使用你的文档语料库测试
-go run cmd/real_world_test/main.go
-
-# 运行单元测试
-go test ./internal/store/...
+MEMORY_HTTP_ADDR=127.0.0.1:8080 \
+MEMORY_DB_PATH=./memory.db \
+./hybridmem-server
 ```
 
----
-
-## 🏗️ 架构概览
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    查询输入                              │
-└────────────────────┬────────────────────────────────────┘
-                     ↓
-┌─────────────────────────────────────────────────────────┐
-│              分层混合检索层                              │
-│  • 层级 1: /project        → 向量 + BM25 → RRF          │
-│  • 层级 2: /project/src    → 向量 + BM25 → RRF          │
-│  • 层级 3: /project/src/auth → 向量 + BM25 → RRF        │
-│                    ↓ 加权聚合                            │
-└────────────────────┬────────────────────────────────────┘
-                     ↓
-┌─────────────────────────────────────────────────────────┐
-│              多阶段评分管道                              │
-│  1. RRF 融合（向量 + BM25）                             │
-│  2. 交叉编码器重排（可选）                               │
-│  3. 新近度提升                                          │
-│  4. 重要性加权                                          │
-│  5. 长度归一化                                          │
-│  6. 硬性分数过滤                                        │
-└────────────────────┬────────────────────────────────────┘
-                     ↓
-┌─────────────────────────────────────────────────────────┐
-│                  Top-K 结果                             │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 核心组件
-
-- **`internal/store/`**：存储层（SQLite + FTS5）
-- **`internal/store/embedding.go`**：向量嵌入集成
-- **`internal/store/rerank.go`**：重排 API 集成
-- **`internal/store/hierarchical.go`**：逐层搜索
-- **`internal/store/hybrid.go`**：RRF 融合逻辑
-- **`internal/store/bm25.go`**：中文分词全文搜索
-
----
-
-## 🌟 核心特性
-
-### 1. 可配置检索模式
-
-无需修改代码即可切换模式：
-
-```yaml
-retrieval_mode: 1  # 快速关键词搜索
-retrieval_mode: 2  # 平衡混合搜索
-retrieval_mode: 3  # 最高准确率（含重排）
-```
-
-### 2. 中文语言支持
-
-- SQLite 自定义中文分词器
-- 正确的词语切分（非字符级）
-- 针对 CJK 语言优化
-
-### 3. 分层上下文感知
-
-文档按文件系统路径组织：
-```
-/project/backend/auth/login.go
-/project/backend/auth/session.go
-/project/frontend/components/LoginForm.tsx
-```
-
-搜索优先返回当前上下文层级的结果。
-
-### 4. API 兼容性
-
-**嵌入 API：**
-- OpenAI (text-embedding-3-small/large)
-- Azure OpenAI
-- 任何 OpenAI 兼容端点
-
-**重排 API：**
-- Jina AI Reranker
-- Cohere Rerank（即将支持）
-- Voyage AI Rerank（即将支持）
-
-### 5. 零 CGO 依赖
-
-与 LanceDB 或 Faiss 不同，HybridMem-RAG 使用纯 Go：
-- ✅ 交叉编译到任何平台
-- ✅ 静态二进制部署
-- ✅ 无 C++ 运行时依赖
-- ✅ 支持 iOS/Android
-
----
-
-## 📚 文档
-
-- **[English Documentation](./README.md)** - 完整英文文档
-- **[架构指南](./docs/architecture/INDEX.md)** - 系统设计细节
-- **[产品需求文档](./docs/PRD.md)** - 产品需求
-- **[技术评审](./docs/TECHNICAL_REVIEW.md)** - 代码质量分析
-- **[OpenViking 集成](./docs/references/openviking-integration.md)** - 分层检索设计
-- **[构建指南](./BUILD.md)** - 编译说明
-
----
-
-## 🧪 测试
-
-### 真实场景测试套件
-
-项目包含使用真实文档语料库的综合测试套件：
+### 4. 健康检查
 
 ```bash
-cd cmd/real_world_test
-go run main.go
+curl http://127.0.0.1:8080/api/health
 ```
 
-**测试场景：**
-- 精确关键词匹配
-- 语义相似度搜索
-- 多词复杂查询
-- 跨领域知识检索
-- 技术术语识别
-
-**示例输出：**
-```
-╔════════════════════════════════════════════════════════════════╗
-║              HybridMem-RAG 真实场景测试报告                     ║
-╚════════════════════════════════════════════════════════════════╝
-
-检索模式: 3 - 完整管道（混合 + 重排）
-
-✓ 数据库初始化: 245ms
-✓ Embedder 已启用 (openai)
-✓ 录入 1,247 个真实文档
-
-━━━ 测试 1: 精确关键词-人工智能 ━━━
-    查询: "人工智能"
-    ✓ 准确率: 100.0% | 相关结果: 5/5 | 总结果: 10
-    前3结果: AI概述.md, 机器学习基础.md, 深度学习教程.md
-
-[... 9 个更多测试 ...]
-
-【综合报告】
-────────────────────────────────────────────────────────────────
-文档数量:     1,247
-测试用例:     10
-通过率:       100.0%
-平均准确率:   92.0%
-评级:         🚀 优秀 - 可用于生产环境
-```
-
----
-
-## 🛠️ 技术栈
-
-| 组件 | 技术 | 用途 |
-|------|------|------|
-| **数据库** | SQLite + FTS5 | 自定义分词器全文搜索 |
-| **向量存储** | SQLite BLOB | 序列化 float32 数组 |
-| **向量搜索** | 纯 Go + SIMD | 余弦相似度计算 |
-| **嵌入** | OpenAI API | 文本 → 向量转换 |
-| **重排** | Jina API | 交叉编码器评分 |
-| **HTTP 服务器** | Go 标准库 | RESTful API |
-| **配置** | YAML | 运行时配置 |
-
----
-
-## 🤝 贡献
-
-欢迎贡献！请先阅读我们的[贡献指南](./CONTRIBUTING.md)。
-
-### 开发环境设置
+### 5. Tool API 示例
 
 ```bash
-# 克隆仓库
-git clone https://github.com/AetherX-Technologies/memory_agentic_RAG.git
-cd memory_agentic_RAG
+curl -X POST http://127.0.0.1:8080/api/v1/tools/memory_store \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "用户喜欢咖啡",
+    "type": "preference"
+  }'
+```
 
-# 安装依赖
-go mod download
-
-# 运行测试
-go test -v ./...
-
-# 运行基准测试
-go test -bench=. ./internal/store/
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/tools/memory_recall \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "用户喜欢什么饮品",
+    "limit": 5
+  }'
 ```
 
 ---
 
-## 📄 许可证
+## HTTP 说明
 
-MIT License - 详见 [LICENSE](./LICENSE)
+HTTP 当前分两层：
+
+- `Tool API`
+  推荐新接入使用，语义与 MCP 对齐
+- `Legacy REST`
+  兼容旧客户端和浏览器插件
+
+推荐新接入优先使用：
+
+- `GET /api/v1/tools`
+- `POST /api/v1/tools/call`
+- `POST /api/v1/tools/{name}`
+
+详细参考：
+
+- [HTTP API 详细文档](./docs/API.md)
+- [使用指南中的 HTTP 章节](./docs/USAGE_GUIDE.md#5-http-api-使用)
+- [HTTP 真实测试报告](./docs/HTTP_TEST_REPORT.md)
 
 ---
 
-## 🙏 致谢
+## MCP 工具
 
-本项目整合了以下项目的思想：
-- **OpenViking** - 分层文件系统感知检索模式
-- **Memory LanceDB Pro** - 多阶段评分和重排管道概念
+| 工具 | 说明 |
+|---|---|
+| `memory_store` | 存储记忆 |
+| `memory_recall` | 召回记忆 |
+| `memory_forget` | 软删除 |
+| `memory_update` | 更新记忆 |
+| `memory_export` | 导出 |
+| `memory_import` | 导入 |
+| `memory_forget_by_tag` | 按标签批量删除 |
+| `memory_consolidate` | 触发合并 |
+| `memory_should_capture` | 判断是否值得存储 |
 
 ---
 
-## 📞 联系方式
+## 目录结构
 
-- **问题反馈**：[GitHub Issues](https://github.com/AetherX-Technologies/memory_agentic_RAG/issues)
-- **讨论交流**：[GitHub Discussions](https://github.com/AetherX-Technologies/memory_agentic_RAG/discussions)
+```text
+internal/
+├── api/             # HTTP Tool API + legacy REST
+├── bootstrap/       # MCP/HTTP 共用启动装配
+├── memservice/      # MCP/HTTP 共用业务语义
+├── mcp/             # MCP 协议适配层
+├── store/           # SQLite + FTS5 + 检索评分
+├── trigger/         # ShouldCapture / ShouldRetrieve / IsNoise
+├── consolidate/     # 记忆合并
+├── config/          # 统一配置
+└── embedder/        # embedding 接入
+```
 
 ---
 
-**由 AetherX Technologies 用 ❤️ 构建**
+## 测试
+
+推荐命令：
+
+```bash
+go test -tags fts5 ./internal/...
+go run -tags fts5 ./cmd/full_memory_test/
+go run -tags fts5 ./cmd/trigger_test/
+```
+
+HTTP 相关验证可以结合：
+
+```bash
+go test -tags fts5 ./internal/api ./internal/mcp ./internal/store ./internal/bootstrap ./internal/memservice
+```
+
+---
+
+## 说明
+
+- 当前 HTTP Tool API 与 MCP 共用同一套 bootstrap 和业务层
+- 当前 legacy REST 仍保留，但不等同于 MCP 工具语义
+- 浏览器插件当前仍依赖 legacy `POST /api/memories`
+
+---
+
+## License
+
+MIT

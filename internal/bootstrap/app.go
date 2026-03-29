@@ -73,24 +73,31 @@ func Load() (*App, error) {
 		app.closeFuncs = append(app.closeFuncs, closeEmbedder)
 	}
 
-	// Load FastText should_capture model (required)
-	ftPath := envOr("MEMORY_FASTTEXT_MODEL", "models/should_capture_best.ftz")
-	if !filepath.IsAbs(ftPath) {
-		exeDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
-		if candidate := filepath.Join(exeDir, ftPath); fileExists(candidate) {
-			ftPath = candidate
+	// Load FastText should_capture models (CJK + EN, both required)
+	for _, ft := range []struct {
+		envKey, defaultPath string
+		initFn             func(string) error
+		label              string
+	}{
+		{"MEMORY_FASTTEXT_MODEL", "models/should_capture_best.ftz", trigger.InitFastText, "CJK"},
+		{"MEMORY_FASTTEXT_MODEL_EN", "models/should_capture_en_best.ftz", trigger.InitFastTextEN, "EN"},
+	} {
+		ftPath := envOr(ft.envKey, ft.defaultPath)
+		if !filepath.IsAbs(ftPath) {
+			exeDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+			if candidate := filepath.Join(exeDir, ftPath); fileExists(candidate) {
+				ftPath = candidate
+			}
+		}
+		if err := ft.initFn(ftPath); err != nil {
+			_ = app.Close()
+			return nil, fmt.Errorf("failed to load fasttext %s model: %w", ft.label, err)
 		}
 	}
-	if err := trigger.InitFastText(ftPath); err != nil {
-		_ = app.Close()
-		return nil, fmt.Errorf("failed to load fasttext model: %w", err)
-	}
-	{
-		app.closeFuncs = append(app.closeFuncs, func() error {
-			trigger.CloseFastText()
-			return nil
-		})
-	}
+	app.closeFuncs = append(app.closeFuncs, func() error {
+		trigger.CloseFastText()
+		return nil
+	})
 
 	llmKey := envOr("MEMORY_LLM_KEY", cfg.LLM.APIKey)
 	if llmKey != "" {

@@ -49,10 +49,10 @@ func (m *Model) Close() {
 	}
 }
 
-// PrepareInput converts text to character-separated format required by
-// the should_capture model (trained with character-level tokenization).
+// PrepareInputCJK converts CJK text to character-separated format required by
+// the Chinese should_capture model (trained with character-level tokenization).
 // Punctuation is stripped to match training data preprocessing.
-func PrepareInput(text string) string {
+func PrepareInputCJK(text string) string {
 	var chars []string
 	for _, r := range text {
 		if unicode.IsPunct(r) || unicode.IsSymbol(r) {
@@ -64,6 +64,12 @@ func PrepareInput(text string) string {
 		chars = append(chars, string(r))
 	}
 	return strings.Join(chars, " ")
+}
+
+// PrepareInputEN converts English text to the format required by
+// the English should_capture model (word-level tokenization, lowercase).
+func PrepareInputEN(text string) string {
+	return strings.ToLower(strings.TrimSpace(text))
 }
 
 // Predict runs prediction on the given text.

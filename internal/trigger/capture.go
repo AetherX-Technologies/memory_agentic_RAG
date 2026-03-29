@@ -27,54 +27,81 @@ const (
 	FastTextSkipThreshold = 0.61
 )
 
-// ftModel holds the singleton FastText classifier (nil if not loaded).
+// Dual FastText models: CJK (Chinese) and EN (English).
 var (
-	ftModel *fasttext.Model
-	ftMu    sync.RWMutex
+	ftModelCJK *fasttext.Model
+	ftModelEN  *fasttext.Model
+	ftMu       sync.RWMutex
 )
 
-// InitFastText loads the FastText should_capture model.
-// Thread-safe; can be called again after CloseFastText.
-// If loading fails, ShouldCapture falls back to rule-based logic.
+// InitFastText loads the CJK FastText should_capture model.
 func InitFastText(modelPath string) error {
 	ftMu.Lock()
 	defer ftMu.Unlock()
-	if ftModel != nil {
-		return nil // already loaded
+	if ftModelCJK != nil {
+		return nil
 	}
 	m, err := fasttext.Load(modelPath)
 	if err != nil {
-		return fmt.Errorf("fasttext init: %w", err)
+		return fmt.Errorf("fasttext CJK init: %w", err)
 	}
-	ftModel = m
-	fmt.Fprintf(os.Stderr, "[memory] fasttext: loaded %s\n", modelPath)
+	ftModelCJK = m
+	fmt.Fprintf(os.Stderr, "[memory] fasttext: loaded CJK model %s\n", modelPath)
 	return nil
 }
 
-// fastTextPredict runs prediction under RLock, ensuring Close cannot
-// free the model while prediction is in flight.
-func fastTextPredict(text string) (fasttext.Prediction, bool) {
+// InitFastTextEN loads the English FastText should_capture model.
+func InitFastTextEN(modelPath string) error {
+	ftMu.Lock()
+	defer ftMu.Unlock()
+	if ftModelEN != nil {
+		return nil
+	}
+	m, err := fasttext.Load(modelPath)
+	if err != nil {
+		return fmt.Errorf("fasttext EN init: %w", err)
+	}
+	ftModelEN = m
+	fmt.Fprintf(os.Stderr, "[memory] fasttext: loaded EN model %s\n", modelPath)
+	return nil
+}
+
+// fastTextPredict routes to the appropriate model based on text language.
+// Holds RLock through the entire Predict call to prevent use-after-free.
+func fastTextPredict(text string, isCJK bool) (fasttext.Prediction, bool) {
 	ftMu.RLock()
 	defer ftMu.RUnlock()
-	if ftModel == nil {
+
+	var m *fasttext.Model
+	var prepared string
+	if isCJK {
+		m = ftModelCJK
+		prepared = fasttext.PrepareInputCJK(text)
+	} else {
+		m = ftModelEN
+		prepared = fasttext.PrepareInputEN(text)
+	}
+	if m == nil {
 		return fasttext.Prediction{}, false
 	}
-	prepared := fasttext.PrepareInput(text)
-	pred, err := ftModel.Predict(prepared)
+	pred, err := m.Predict(prepared)
 	if err != nil {
 		return fasttext.Prediction{}, false
 	}
 	return pred, true
 }
 
-// CloseFastText releases the FastText model resources.
-// Thread-safe; blocks until all in-flight predictions complete.
+// CloseFastText releases all FastText model resources.
 func CloseFastText() {
 	ftMu.Lock()
 	defer ftMu.Unlock()
-	if ftModel != nil {
-		ftModel.Close()
-		ftModel = nil
+	if ftModelCJK != nil {
+		ftModelCJK.Close()
+		ftModelCJK = nil
+	}
+	if ftModelEN != nil {
+		ftModelEN.Close()
+		ftModelEN = nil
 	}
 }
 
@@ -158,17 +185,16 @@ func ShouldCapture(text string) (bool, CaptureReason) {
 		}
 	}
 
-	// 2. FastText classifier (if loaded) — only for CJK text (model trained on Chinese)
-	if textIsCJK(text) {
-		if pred, ok := fastTextPredict(text); ok {
-			if pred.Label == "skip" && pred.Confidence >= FastTextSkipThreshold {
-				return false, ReasonFastTextSkip
-			}
-			if pred.Label == "capture" && pred.Confidence >= FastTextSkipThreshold {
-				return true, ReasonFastTextCapture
-			}
-			// Low confidence (either label) → fall through to rule-based logic
+	// 2. FastText classifier — route to CJK or EN model based on text language
+	isCJK := textIsCJK(text)
+	if pred, ok := fastTextPredict(text, isCJK); ok {
+		if pred.Label == "skip" && pred.Confidence >= FastTextSkipThreshold {
+			return false, ReasonFastTextSkip
 		}
+		if pred.Label == "capture" && pred.Confidence >= FastTextSkipThreshold {
+			return true, ReasonFastTextCapture
+		}
+		// Low confidence (either label) → fall through to rule-based logic
 	}
 
 	// 3. Implicit triggers (rule-based fallback)

@@ -7,18 +7,33 @@ import (
 
 const testModelPath = "/Volumes/SN770Coder/code/fastTextTrain/models/should_capture_best.ftz"
 
-func TestPrepareInput(t *testing.T) {
+func TestPrepareInputCJK(t *testing.T) {
 	tests := []struct {
 		input string
 		want  string
 	}{
 		{"我是算法架构师", "我 是 算 法 架 构 师"},
-		{"hello", "h e l l o"},
 		{"", ""},
+		{"真棒，你好", "真 棒 你 好"}, // punctuation stripped
 	}
 	for _, tt := range tests {
-		if got := PrepareInput(tt.input); got != tt.want {
-			t.Errorf("PrepareInput(%q) = %q, want %q", tt.input, got, tt.want)
+		if got := PrepareInputCJK(tt.input); got != tt.want {
+			t.Errorf("PrepareInputCJK(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestPrepareInputEN(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"I am a developer", "i am a developer"},
+		{"  Hello World  ", "hello world"},
+	}
+	for _, tt := range tests {
+		if got := PrepareInputEN(tt.input); got != tt.want {
+			t.Errorf("PrepareInputEN(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }

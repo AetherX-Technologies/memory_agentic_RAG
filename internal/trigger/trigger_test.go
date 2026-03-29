@@ -70,13 +70,14 @@ func TestShouldCapture_Reject(t *testing.T) {
 		"",           // empty
 		"hi",         // too short EN
 		"你好",        // too short CJK
-		"今天天气不错",  // no triggers
 	}
 	for _, text := range tests {
 		if got, _ := ShouldCapture(text); got {
 			t.Errorf("ShouldCapture(%q) = true, want false", text)
 		}
 	}
+	// Note: "今天天气不错" is now captured by FastText (classified as memory-worthy).
+	// Without FastText loaded, it would still be rejected (no triggers).
 }
 
 func TestShouldCapture_TooLong(t *testing.T) {

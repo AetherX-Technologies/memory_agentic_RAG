@@ -2,25 +2,89 @@
 package trigger
 
 import (
+	"fmt"
+	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode/utf8"
+
+	"github.com/yourusername/hybridmem-rag/internal/fasttext"
 )
 
 // CaptureReason describes why a text was flagged for capture.
 type CaptureReason string
 
 const (
-	ReasonExplicit CaptureReason = "explicit"
-	ReasonImplicit CaptureReason = "implicit"
-	ReasonPattern  CaptureReason = "pattern"
+	ReasonExplicit        CaptureReason = "explicit"
+	ReasonImplicit        CaptureReason = "implicit"
+	ReasonPattern         CaptureReason = "pattern"
+	ReasonFastTextSkip    CaptureReason = "fasttext_skip"
+	ReasonFastTextCapture CaptureReason = "fasttext_capture"
+
+	// FastText skip confidence threshold — only skip when model is very sure.
+	// Conservative: prefer false positives (capture noise) over false negatives (miss memories).
+	FastTextSkipThreshold = 0.61
 )
+
+// ftModel holds the singleton FastText classifier (nil if not loaded).
+var (
+	ftModel *fasttext.Model
+	ftMu    sync.RWMutex
+)
+
+// InitFastText loads the FastText should_capture model.
+// Thread-safe; can be called again after CloseFastText.
+// If loading fails, ShouldCapture falls back to rule-based logic.
+func InitFastText(modelPath string) error {
+	ftMu.Lock()
+	defer ftMu.Unlock()
+	if ftModel != nil {
+		return nil // already loaded
+	}
+	m, err := fasttext.Load(modelPath)
+	if err != nil {
+		return fmt.Errorf("fasttext init: %w", err)
+	}
+	ftModel = m
+	fmt.Fprintf(os.Stderr, "[memory] fasttext: loaded %s\n", modelPath)
+	return nil
+}
+
+// fastTextPredict runs prediction under RLock, ensuring Close cannot
+// free the model while prediction is in flight.
+func fastTextPredict(text string) (fasttext.Prediction, bool) {
+	ftMu.RLock()
+	defer ftMu.RUnlock()
+	if ftModel == nil {
+		return fasttext.Prediction{}, false
+	}
+	prepared := fasttext.PrepareInput(text)
+	pred, err := ftModel.Predict(prepared)
+	if err != nil {
+		return fasttext.Prediction{}, false
+	}
+	return pred, true
+}
+
+// CloseFastText releases the FastText model resources.
+// Thread-safe; blocks until all in-flight predictions complete.
+func CloseFastText() {
+	ftMu.Lock()
+	defer ftMu.Unlock()
+	if ftModel != nil {
+		ftModel.Close()
+		ftModel = nil
+	}
+}
 
 // ConfidenceForReason returns the default confidence for a capture reason.
 func ConfidenceForReason(r CaptureReason) float64 {
 	switch r {
 	case ReasonExplicit:
 		return 0.95
+	case ReasonFastTextCapture:
+		return 0.85
 	case ReasonImplicit:
 		return 0.7
 	case ReasonPattern:
@@ -86,7 +150,7 @@ func ShouldCapture(text string) (bool, CaptureReason) {
 		return false, ""
 	}
 
-	// Explicit triggers (highest priority)
+	// 1. Explicit triggers (highest priority — always capture)
 	lower := strings.ToLower(text)
 	for _, t := range explicitTriggers {
 		if strings.Contains(lower, strings.ToLower(t)) {
@@ -94,14 +158,27 @@ func ShouldCapture(text string) (bool, CaptureReason) {
 		}
 	}
 
-	// Implicit triggers
+	// 2. FastText classifier (if loaded) — only for CJK text (model trained on Chinese)
+	if textIsCJK(text) {
+		if pred, ok := fastTextPredict(text); ok {
+			if pred.Label == "skip" && pred.Confidence >= FastTextSkipThreshold {
+				return false, ReasonFastTextSkip
+			}
+			if pred.Label == "capture" && pred.Confidence >= FastTextSkipThreshold {
+				return true, ReasonFastTextCapture
+			}
+			// Low confidence (either label) → fall through to rule-based logic
+		}
+	}
+
+	// 3. Implicit triggers (rule-based fallback)
 	for _, t := range implicitTriggers {
 		if strings.Contains(lower, strings.ToLower(t)) {
 			return true, ReasonImplicit
 		}
 	}
 
-	// Regex patterns
+	// 4. Regex patterns
 	for _, r := range regexTriggers {
 		if r.MatchString(text) {
 			return true, ReasonPattern

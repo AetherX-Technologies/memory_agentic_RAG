@@ -314,6 +314,9 @@ func (s *Service) Store(_ context.Context, req StoreRequest) (*StoreResponse, er
 		if err != nil {
 			return nil, classifyStoreError("store memory", err)
 		}
+		if result.ID != "" && len(req.Tags) > 0 {
+			_ = s.store.SetTags(result.ID, req.Tags)
+		}
 		return &StoreResponse{
 			ID:     result.ID,
 			Action: result.Action,
@@ -343,6 +346,10 @@ func (s *Service) Store(_ context.Context, req StoreRequest) (*StoreResponse, er
 	id, err := s.store.Insert(mem)
 	if err != nil {
 		return nil, classifyStoreError("store memory", err)
+	}
+
+	if len(req.Tags) > 0 {
+		_ = s.store.SetTags(id, req.Tags)
 	}
 
 	return &StoreResponse{
@@ -537,6 +544,9 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 				return nil, &ToolError{Code: ErrorCodeInternal, Message: "failed to update importance", Err: err}
 			}
 		}
+		if len(req.Tags) > 0 {
+			_ = s.store.SetTags(req.ID, req.Tags)
+		}
 		return &UpdateResponse{
 			ID:     req.ID,
 			Status: "updated",
@@ -580,6 +590,9 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		}
 		if result.ID != "" {
 			_ = s.store.RecordSupersession(req.ID, result.ID)
+			if len(req.Tags) > 0 {
+				_ = s.store.SetTags(result.ID, req.Tags)
+			}
 		}
 		return &UpdateResponse{
 			OldID:  req.ID,
@@ -616,6 +629,10 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 
 	if err := s.store.RecordSupersession(req.ID, newID); err != nil {
 		return nil, &ToolError{Code: ErrorCodeInternal, Message: "record supersession", Err: err}
+	}
+
+	if len(req.Tags) > 0 {
+		_ = s.store.SetTags(newID, req.Tags)
 	}
 
 	return &UpdateResponse{

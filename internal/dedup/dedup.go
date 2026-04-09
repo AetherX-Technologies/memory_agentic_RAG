@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -34,11 +35,17 @@ type Config struct {
 
 	// Search
 	CandidateLimit int // how many existing memories to check (default: 20)
+
+	// Connection building
+	ConnectionMinSim float64 // minimum similarity for connection (default: 0.7)
+	ConnectionMaxSim float64 // maximum similarity for connection (below ConflictThreshold, default: 0.85)
+	MaxConnections   int     // max connections per store operation (default: 3)
 }
 
 // DefaultConfig returns sensible defaults.
+// LLM settings are read from environment variables if available.
 func DefaultConfig() Config {
-	return Config{
+	cfg := Config{
 		DupThreshold:      0.93,
 		ConflictThreshold: 0.85,
 		ShortTextTokens:   20,
@@ -46,7 +53,21 @@ func DefaultConfig() Config {
 		LLMEndpoint:       "https://api.openai.com/v1/chat/completions",
 		LLMTimeout:        15,
 		CandidateLimit:    20,
+		ConnectionMinSim:  0.70,
+		ConnectionMaxSim:  0.85,
+		MaxConnections:    3,
 	}
+	// Pick up LLM config from environment (same vars as consolidation)
+	if key := os.Getenv("MEMORY_LLM_KEY"); key != "" {
+		cfg.LLMAPIKey = key
+	}
+	if ep := os.Getenv("MEMORY_LLM_ENDPOINT"); ep != "" {
+		cfg.LLMEndpoint = ep
+	}
+	if m := os.Getenv("MEMORY_LLM_MODEL"); m != "" {
+		cfg.LLMModel = m
+	}
+	return cfg
 }
 
 // Result describes what happened when storing a memory.
@@ -66,8 +87,11 @@ type Deduplicator struct {
 	mu       sync.Mutex // serializes check-then-insert
 }
 
-// New creates a new Deduplicator.
+// New creates a new Deduplicator. Embedder must not be nil.
 func New(s store.Store, embedder store.Embedder, config Config) *Deduplicator {
+	if embedder == nil {
+		panic("dedup: embedder must not be nil")
+	}
 	if config.DupThreshold <= 0 {
 		config.DupThreshold = 0.93
 	}
@@ -189,6 +213,8 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 						Reason: fmt.Sprintf("stored but supersession recording failed: %v", err),
 					}, nil
 				}
+				// Build connections for the new memory, excluding the superseded one
+				d.buildConnectionsFiltered(id, candidates, conflictThresh, map[string]bool{c.Entry.ID: true})
 				return Result{
 					Action: "superseded",
 					ID:     id,
@@ -212,11 +238,50 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 		}
 		return Result{}, err
 	}
+
+	// Step 5: Build connections to related memories
+	d.buildConnectionsFiltered(id, candidates, conflictThresh, nil)
+
 	return Result{
 		Action: "stored",
 		ID:     id,
 		Reason: "new memory",
 	}, nil
+}
+
+// buildConnectionsFiltered creates bidirectional links to semantically related memories.
+// Uses the candidates already fetched during dedup search (no extra DB query).
+// maxSim is set to the effective conflict threshold to avoid linking conflict-zone candidates.
+// excludeIDs are skipped (e.g. the just-superseded memory).
+func (d *Deduplicator) buildConnectionsFiltered(newID string, candidates []store.SearchResult, effectiveConflictThresh float64, excludeIDs map[string]bool) {
+	minSim := d.config.ConnectionMinSim
+	maxSim := effectiveConflictThresh // use adaptive threshold, not static config
+	maxConns := d.config.MaxConnections
+	if maxConns <= 0 {
+		maxConns = 3
+	}
+
+	linked := 0
+	for _, c := range candidates {
+		if linked >= maxConns {
+			break
+		}
+		if excludeIDs != nil && excludeIDs[c.Entry.ID] {
+			continue
+		}
+		sim := float64(c.Score)
+		if sim < minSim || sim >= maxSim {
+			continue
+		}
+		rel := fmt.Sprintf("related (sim=%.2f)", sim)
+		if err := d.store.AddConnection(newID, c.Entry.ID, rel); err != nil {
+			fmt.Fprintf(os.Stderr, "[dedup] connection %s→%s failed: %v\n", newID[:8], c.Entry.ID[:8], err)
+		}
+		if err := d.store.AddConnection(c.Entry.ID, newID, rel); err != nil {
+			fmt.Fprintf(os.Stderr, "[dedup] connection %s→%s failed: %v\n", c.Entry.ID[:8], newID[:8], err)
+		}
+		linked++
+	}
 }
 
 // insertMemory converts ExtractedMemory to store.Memory and inserts it.

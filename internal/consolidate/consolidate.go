@@ -95,9 +95,18 @@ func (c *Consolidator) Consolidate(ctx context.Context) (*store.Consolidation, e
 	}
 
 	// Serialize to JSON
-	sourceIDsJSON, _ := json.Marshal(sourceIDs)
-	patternsJSON, _ := json.Marshal(result.Patterns)
-	connsJSON, _ := json.Marshal(result.Connections)
+	sourceIDsJSON, err := json.Marshal(sourceIDs)
+	if err != nil {
+		return nil, fmt.Errorf("marshal source_ids: %w", err)
+	}
+	patternsJSON, err := json.Marshal(result.Patterns)
+	if err != nil {
+		return nil, fmt.Errorf("marshal patterns: %w", err)
+	}
+	connsJSON, err := json.Marshal(result.Connections)
+	if err != nil {
+		return nil, fmt.Errorf("marshal connections: %w", err)
+	}
 
 	consolidation := &store.Consolidation{
 		ID:              uuid.New().String(),
@@ -116,16 +125,17 @@ func (c *Consolidator) Consolidate(ctx context.Context) (*store.Consolidation, e
 	// Update connections in individual memories (bidirectional)
 	var connErrors []string
 	for _, conn := range result.Connections {
-		fromID := fmt.Sprint(conn["from_id"])
-		toID := fmt.Sprint(conn["to_id"])
-		rel := fmt.Sprint(conn["relationship"])
-		if fromID != "" && toID != "" && fromID != "<nil>" && toID != "<nil>" {
-			if err := c.store.AddConnection(fromID, toID, rel); err != nil {
-				connErrors = append(connErrors, fmt.Sprintf("%s→%s: %v", fromID, toID, err))
-			}
-			if err := c.store.AddConnection(toID, fromID, rel); err != nil {
-				connErrors = append(connErrors, fmt.Sprintf("%s→%s: %v", toID, fromID, err))
-			}
+		fromID, _ := conn["from_id"].(string)
+		toID, _ := conn["to_id"].(string)
+		rel, _ := conn["relationship"].(string)
+		if fromID == "" || toID == "" || rel == "" {
+			continue
+		}
+		if err := c.store.AddConnection(fromID, toID, rel); err != nil {
+			connErrors = append(connErrors, fmt.Sprintf("%s→%s: %v", fromID, toID, err))
+		}
+		if err := c.store.AddConnection(toID, fromID, rel); err != nil {
+			connErrors = append(connErrors, fmt.Sprintf("%s→%s: %v", toID, fromID, err))
 		}
 	}
 	// Log connection errors (don't fail consolidation for partial graph issues)

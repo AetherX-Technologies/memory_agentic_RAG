@@ -3,6 +3,7 @@ package consolidate
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,7 @@ type Scheduler struct {
 	interval     time.Duration
 	minMemories  int
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	logger       *slog.Logger
 }
 
@@ -50,14 +52,11 @@ func (s *Scheduler) Start() {
 	}()
 }
 
-// Stop stops the scheduler. Safe to call multiple times.
+// Stop stops the scheduler. Safe to call concurrently and multiple times.
 func (s *Scheduler) Stop() {
-	select {
-	case <-s.stopCh:
-		// already closed
-	default:
+	s.stopOnce.Do(func() {
 		close(s.stopCh)
-	}
+	})
 }
 
 func (s *Scheduler) run() {

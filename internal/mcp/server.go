@@ -16,6 +16,8 @@ import (
 	"sync"
 
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
+	"github.com/yourusername/hybridmem-rag/internal/dedup"
+	"github.com/yourusername/hybridmem-rag/internal/memservice"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 )
 
@@ -24,6 +26,7 @@ type Server struct {
 	store        store.Store
 	embedder     store.Embedder
 	consolidator *consolidate.Consolidator // nil if LLM not configured
+	service      *memservice.Service
 	handlers     map[string]ToolHandler
 	config       Config
 	mu           sync.Mutex
@@ -57,6 +60,12 @@ func New(s store.Store, embedder store.Embedder, cfg Config, cons ...*consolidat
 	}
 	if len(cons) > 0 {
 		srv.consolidator = cons[0]
+	}
+	srv.service = memservice.New(s, embedder, srv.consolidator)
+	// Wire dedup into service if embedder is available
+	if embedder != nil {
+		d := dedup.New(s, embedder, dedup.DefaultConfig())
+		srv.service.SetDedup(d)
 	}
 	srv.registerTools()
 	return srv
@@ -195,7 +204,17 @@ func (s *Server) writeLineJSON(w io.Writer, resp *JSONRPCResponse) {
 	defer s.mu.Unlock()
 	body, err := json.Marshal(resp)
 	if err != nil {
-		return
+		// Send an internal error response preserving the request ID
+		fallback := &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      resp.ID,
+			Error:   &JSONRPCError{Code: -32603, Message: "internal: marshal failed"},
+		}
+		if errBody, merr := json.Marshal(fallback); merr == nil {
+			body = errBody
+		} else {
+			body = []byte(`{"jsonrpc":"2.0","error":{"code":-32603,"message":"internal: marshal failed"},"id":null}`)
+		}
 	}
 	if s.stdoutBuf != nil && w == os.Stdout {
 		s.stdoutBuf.Write(body)
@@ -214,7 +233,17 @@ func (s *Server) writeContentLength(w io.Writer, resp *JSONRPCResponse) {
 	defer s.mu.Unlock()
 	body, err := json.Marshal(resp)
 	if err != nil {
-		return
+		// Send an internal error response preserving the request ID
+		fallback := &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      resp.ID,
+			Error:   &JSONRPCError{Code: -32603, Message: "internal: marshal failed"},
+		}
+		if errBody, merr := json.Marshal(fallback); merr == nil {
+			body = errBody
+		} else {
+			body = []byte(`{"jsonrpc":"2.0","error":{"code":-32603,"message":"internal: marshal failed"},"id":null}`)
+		}
 	}
 	if s.stdoutBuf != nil && w == os.Stdout {
 		fmt.Fprintf(s.stdoutBuf, "Content-Length: %d\r\n\r\n", len(body))
@@ -305,10 +334,7 @@ func (s *Server) handleInitialize(req *JSONRPCRequest) *JSONRPCResponse {
 func (s *Server) handleToolsList(req *JSONRPCRequest) *JSONRPCResponse {
 	// Default: expose all tools. Single-tool mode (only memory_recall) for
 	// LLM providers whose SSE tool_call format is incompatible with some SDKs.
-	defs := allToolDefinitions
-	if os.Getenv("MEMORY_SINGLE_TOOL") == "1" {
-		defs = toolDefinitions
-	}
+	defs := memservice.VisibleToolDefinitions(os.Getenv("MEMORY_SINGLE_TOOL") == "1")
 	return &JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,

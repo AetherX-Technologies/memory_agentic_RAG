@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
+	"github.com/yourusername/hybridmem-rag/internal/dedup"
+	"github.com/yourusername/hybridmem-rag/internal/extractor"
 	"github.com/yourusername/hybridmem-rag/internal/store"
+	"github.com/yourusername/hybridmem-rag/internal/tokutil"
 	"github.com/yourusername/hybridmem-rag/internal/trigger"
 )
 
@@ -51,6 +54,7 @@ type Service struct {
 	store        store.Store
 	embedder     store.Embedder
 	consolidator *consolidate.Consolidator
+	dedup        *dedup.Deduplicator
 }
 
 type StoreRequest struct {
@@ -193,6 +197,12 @@ func New(s store.Store, embedder store.Embedder, cons *consolidate.Consolidator)
 	}
 }
 
+// SetDedup wires in the deduplicator for store-time dedup and connection building.
+// Called after construction because dedup depends on store + embedder which Service also holds.
+func (s *Service) SetDedup(d *dedup.Deduplicator) {
+	s.dedup = d
+}
+
 func DefaultToolRecallOptions() RecallOptions {
 	return RecallOptions{
 		AllowMutation:      true,
@@ -292,6 +302,26 @@ func (s *Service) Store(_ context.Context, req StoreRequest) (*StoreResponse, er
 	h := sha256.Sum256([]byte(req.Content))
 	contentHash := hex.EncodeToString(h[:8])
 
+	// Route through dedup pipeline when available (enables dedup + connection building)
+	if s.dedup != nil {
+		result, err := s.dedup.StoreWithDedup(context.Background(), extractor.ExtractedMemory{
+			Content:     req.Content,
+			MemoryType:  req.Type,
+			Importance:  req.Importance,
+			Confidence:  0.9,
+			ContentHash: contentHash,
+		})
+		if err != nil {
+			return nil, classifyStoreError("store memory", err)
+		}
+		return &StoreResponse{
+			ID:     result.ID,
+			Action: result.Action,
+			Reason: result.Reason,
+		}, nil
+	}
+
+	// Fallback: direct insert (no dedup, no connections)
 	var vec []float32
 	if s.embedder != nil {
 		if v, err := s.embedder.Embed(req.Content); err == nil {
@@ -328,8 +358,14 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	if req.Limit > 100 {
+		req.Limit = 100
+	}
 	if req.MaxTokens <= 0 {
 		req.MaxTokens = 1000
+	}
+	if req.MaxTokens > 8000 {
+		req.MaxTokens = 8000
 	}
 
 	if opts.AllowMutation && opts.EnableAutoCapture {
@@ -387,30 +423,80 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 		filtered = filtered[:req.Limit]
 	}
 
-	insightBudget := req.MaxTokens / 5
-	memoryBudget := req.MaxTokens - insightBudget
-	formatted := formatContext(filtered, memoryBudget)
+	// Step: expand connections from top hits
+	connMemories := s.expandConnections(filtered, req.Limit)
 
+	// First check if we have insights to show, then allocate budget accordingly
 	consolidations, err := s.store.ListConsolidations(5)
 	if err != nil {
 		consolidations = nil
 	}
+
+	// Build insight lines first to know actual usage
+	var insightLines []string
+	var insightHeader string
+	insightUsed := 0
 	if len(consolidations) > 0 {
-		insightsText := "\n🧠 洞察\n"
-		usedTokens := 0
-		for _, c := range consolidations {
-			if c.Insight == "" {
+		insightHeader = "\n🧠 洞察\n"
+		insightBudget := req.MaxTokens / 5
+		if insightBudget > 0 {
+			headerTokens := tokutil.EstimateTokens(insightHeader)
+			insightUsed = headerTokens
+			for _, c := range consolidations {
+				if c.Insight == "" {
+					continue
+				}
+				line := "- " + c.Insight + "\n"
+				lineTokens := tokutil.EstimateTokens(line)
+				if insightUsed+lineTokens > insightBudget {
+					continue
+				}
+				insightLines = append(insightLines, line)
+				insightUsed += lineTokens
+			}
+			if len(insightLines) == 0 {
+				insightUsed = 0 // no insights fit, reclaim budget for memories
+			}
+		}
+	}
+
+	// Budget allocation: connections get 15% if present, insights get their share, rest to memories
+	connBudget := 0
+	if len(connMemories) > 0 {
+		connBudget = req.MaxTokens / 7 // ~15%
+	}
+	memoryBudget := req.MaxTokens - insightUsed - connBudget
+	formatted := formatContext(filtered, memoryBudget)
+
+	// Append connected memories section
+	if len(connMemories) > 0 && connBudget > 0 {
+		connHeader := "\n🔗 关联记忆\n"
+		headerTokens := tokutil.EstimateTokens(connHeader)
+		usedTokens := headerTokens
+		var connLines []string
+		for _, cm := range connMemories {
+			line := "- " + strings.ReplaceAll(cm.Text, "\n", " ") + "\n"
+			lineTokens := tokutil.EstimateTokens(line)
+			if usedTokens+lineTokens > connBudget {
 				continue
 			}
-			line := "- " + c.Insight + "\n"
-			lineTokens := len([]rune(line)) * 2 / 3
-			if usedTokens+lineTokens > insightBudget {
-				break
-			}
-			insightsText += line
+			connLines = append(connLines, line)
 			usedTokens += lineTokens
 		}
-		formatted += insightsText
+		if len(connLines) > 0 {
+			formatted += connHeader
+			for _, line := range connLines {
+				formatted += line
+			}
+		}
+	}
+
+	// Append insights if any
+	if len(insightLines) > 0 {
+		formatted += insightHeader
+		for _, line := range insightLines {
+			formatted += line
+		}
 	}
 
 	return &RecallResponse{
@@ -467,6 +553,42 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		newImportance = *req.Importance
 	}
 
+	h := sha256.Sum256([]byte(req.Content))
+	contentHash := hex.EncodeToString(h[:8])
+
+	// Route through dedup to get connections built for the new version
+	if s.dedup != nil {
+		result, err := s.dedup.StoreWithDedup(context.Background(), extractor.ExtractedMemory{
+			Content:     req.Content,
+			MemoryType:  existing.MemoryType,
+			Importance:  newImportance,
+			Confidence:  existing.Confidence,
+			ContentHash: contentHash,
+			SourceConv:  existing.SourceConv,
+		})
+		if err != nil {
+			_ = s.store.Restore(req.ID)
+			return nil, classifyStoreError("insert updated memory", err)
+		}
+		if result.Action == "duplicate" {
+			// New content is a duplicate of something else — restore old and report
+			_ = s.store.Restore(req.ID)
+			return &UpdateResponse{
+				ID:     req.ID,
+				Status: "duplicate",
+			}, nil
+		}
+		if result.ID != "" {
+			_ = s.store.RecordSupersession(req.ID, result.ID)
+		}
+		return &UpdateResponse{
+			OldID:  req.ID,
+			NewID:  result.ID,
+			Status: "updated",
+		}, nil
+	}
+
+	// Fallback: direct insert without dedup
 	var vec []float32
 	if s.embedder != nil {
 		if v, err := s.embedder.Embed(req.Content); err == nil {
@@ -474,7 +596,6 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		}
 	}
 
-	h := sha256.Sum256([]byte(req.Content))
 	newMem := &store.Memory{
 		Text:        req.Content,
 		Category:    "memory",
@@ -482,7 +603,7 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		Importance:  newImportance,
 		MemoryType:  existing.MemoryType,
 		Confidence:  existing.Confidence,
-		ContentHash: hex.EncodeToString(h[:8]),
+		ContentHash: contentHash,
 		SourceConv:  existing.SourceConv,
 		Vector:      vec,
 	}
@@ -702,6 +823,22 @@ func (s *Service) autoStore(text string, reason trigger.CaptureReason) {
 	h := sha256.Sum256([]byte(text))
 	contentHash := hex.EncodeToString(h[:8])
 
+	// Route through dedup when available
+	if s.dedup != nil {
+		result, err := s.dedup.StoreWithDedup(context.Background(), extractor.ExtractedMemory{
+			Content:     text,
+			MemoryType:  "fact",
+			Importance:  0.7,
+			Confidence:  trigger.ConfidenceForReason(reason),
+			ContentHash: contentHash,
+		})
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "[memory] auto-%s: %s (reason=%s, id=%s)\n", result.Action, text[:min(len(text), 30)], reason, result.ID[:min(len(result.ID), 8)])
+		}
+		return
+	}
+
+	// Fallback: direct insert
 	var vec []float32
 	if s.embedder != nil {
 		if v, err := s.embedder.Embed(text); err == nil {
@@ -709,13 +846,12 @@ func (s *Service) autoStore(text string, reason trigger.CaptureReason) {
 		}
 	}
 
-	memType := "fact"
 	mem := &store.Memory{
 		Text:        text,
 		Category:    "memory",
 		Scope:       "global",
 		Importance:  0.7,
-		MemoryType:  memType,
+		MemoryType:  "fact",
 		Confidence:  trigger.ConfidenceForReason(reason),
 		ContentHash: contentHash,
 		Vector:      vec,
@@ -724,6 +860,64 @@ func (s *Service) autoStore(text string, reason trigger.CaptureReason) {
 	if id, err := s.store.Insert(mem); err == nil {
 		fmt.Fprintf(os.Stderr, "[memory] auto-stored: %s (reason=%s, id=%s)\n", text[:min(len(text), 30)], reason, id[:8])
 	}
+}
+
+// expandConnections fetches connected memories for the top search hits.
+// Returns unique connected memories that are not already in the result set.
+func (s *Service) expandConnections(results []store.SearchResult, maxConnected int) []*store.Memory {
+	if len(results) == 0 || maxConnected <= 0 {
+		return nil
+	}
+
+	// Collect IDs already in results
+	seen := make(map[string]bool, len(results))
+	for _, r := range results {
+		seen[r.Entry.ID] = true
+	}
+
+	// Only expand top 3 hits to limit DB queries
+	topN := 3
+	if topN > len(results) {
+		topN = len(results)
+	}
+
+	var connected []*store.Memory
+	for _, r := range results[:topN] {
+		// Get full memory with connections
+		mem, err := s.store.Get(r.Entry.ID)
+		if err != nil || mem.Connections == "" || mem.Connections == "[]" {
+			continue
+		}
+
+		var conns []map[string]string
+		if err := json.Unmarshal([]byte(mem.Connections), &conns); err != nil {
+			continue
+		}
+
+		for _, conn := range conns {
+			linkedID := conn["linked_to"]
+			if linkedID == "" || seen[linkedID] {
+				continue
+			}
+			seen[linkedID] = true
+
+			linked, err := s.store.Get(linkedID)
+			if err != nil || linked.DeletedAt > 0 || linked.Expired {
+				continue
+			}
+			// Skip expired-but-not-yet-cleaned memories
+			if linked.ExpiresAt > 0 && linked.ExpiresAt < time.Now().Unix() {
+				continue
+			}
+
+			connected = append(connected, linked)
+			if len(connected) >= maxConnected {
+				return connected
+			}
+		}
+	}
+
+	return connected
 }
 
 func decodeArgs(args json.RawMessage, target interface{}) error {

@@ -4,18 +4,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
+	"github.com/yourusername/hybridmem-rag/internal/consolidate"
+	"github.com/yourusername/hybridmem-rag/internal/dedup"
+	"github.com/yourusername/hybridmem-rag/internal/memservice"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 )
 
 type Handler struct {
-	store store.Store
+	store          store.Store
+	service        *memservice.Service
+	singleToolMode bool
 }
 
 func NewHandler(store store.Store) *Handler {
-	return &Handler{store: store}
+	return NewHandlerWithDeps(store, nil, nil)
+}
+
+func NewHandlerWithDeps(st store.Store, embedder store.Embedder, consolidator *consolidate.Consolidator) *Handler {
+	svc := memservice.New(st, embedder, consolidator)
+	// Wire dedup into service if embedder is available
+	if embedder != nil {
+		d := dedup.New(st, embedder, dedup.DefaultConfig())
+		svc.SetDedup(d)
+	}
+	return &Handler{
+		store:          st,
+		service:        svc,
+		singleToolMode: os.Getenv("MEMORY_SINGLE_TOOL") == "1",
+	}
 }
 
 type ErrorResponse struct {
@@ -103,18 +123,19 @@ func (h *Handler) SearchMemories(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// TODO: 需要添加 embedder 支持
-	// 临时方案：使用空向量会导致无意义的相似度，应该只使用 BM25
-	queryVec := []float32{} // 空向量表示未向量化
+	opts := memservice.DefaultLegacyRecallOptions()
+	opts.Scopes = scopes
+	opts.CurrentPath = currentPath
 
-	// Escape FTS5 special characters to prevent syntax errors
-	escapedQuery := store.EscapeFTS5Query(query)
-
-	results, err := h.store.Search(queryVec, escapedQuery, currentPath, limit, scopes)
+	resp, err := h.service.Recall(r.Context(), memservice.RecallRequest{
+		Query: query,
+		Limit: limit,
+	}, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	results := resp.Memories
 
 	// API versioning: v2 omits full content, provides lazy-load URL
 	apiVersion := r.Header.Get("X-API-Version")

@@ -7,7 +7,9 @@ var singleToolDefinitions = []map[string]interface{}{
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"query": map[string]string{"type": "string", "description": "The user's message or search query"},
+				"query":      map[string]string{"type": "string", "description": "The user's message or search query"},
+				"limit":      map[string]interface{}{"type": "integer", "default": 10},
+				"max_tokens": map[string]interface{}{"type": "integer", "description": "Max tokens for the returned context (default: 1000). Use this to fit results within your available context budget."},
 			},
 			"required": []string{"query"},
 		},
@@ -33,8 +35,9 @@ var allToolDefinitions = []map[string]interface{}{
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"query": map[string]string{"type": "string", "description": "Search query text"},
-				"limit": map[string]interface{}{"type": "integer", "default": 10},
+				"query":      map[string]string{"type": "string", "description": "Search query text"},
+				"limit":      map[string]interface{}{"type": "integer", "default": 10},
+				"max_tokens": map[string]interface{}{"type": "integer", "description": "Max tokens for the returned context (default: 1000). Use this to fit results within your available context budget."},
 			},
 			"required": []string{"query"},
 		},

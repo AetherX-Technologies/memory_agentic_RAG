@@ -24,7 +24,12 @@ func parseHierarchyLevels(path string) []string {
 	if path == "" {
 		return []string{}
 	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		// Root path "/" — skip hierarchical filtering, let global fallback handle it
+		return []string{}
+	}
+	parts := strings.Split(trimmed, "/")
 	levels := make([]string, len(parts))
 	for i := range parts {
 		levels[i] = "/" + strings.Join(parts[:i+1], "/")
@@ -278,6 +283,12 @@ func (s *sqliteStore) HierarchicalHybridSearch(queryVec []float32, query string,
 	}
 
 	levels := parseHierarchyLevels(currentPath)
+
+	// Root path or empty path: skip hierarchical levels, do a full hybrid search
+	if len(levels) == 0 {
+		return s.HybridSearch(queryVec, query, limit, scopes)
+	}
+
 	var allResults []SearchResult
 
 	for i, level := range levels {
@@ -335,6 +346,8 @@ func (s *sqliteStore) HierarchicalHybridSearch(queryVec []float32, query string,
 }
 
 // searchGlobalMemories 搜索无层次路径的记忆
+// Bug fix: when both queryVec and query text are provided, run both vector and BM25 search
+// and fuse with RRF, instead of returning vector-only results.
 func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, limit int, scopes []string) ([]SearchResult, error) {
 	// 只搜索 hierarchy_path IS NULL 的全局记忆（排除已过期）
 	scopeFilter := " AND m.hierarchy_path IS NULL AND m.expired = 0 AND m.deleted_at = 0 AND (m.expires_at = 0 OR m.expires_at > strftime('%s','now'))"
@@ -343,7 +356,10 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 		scopeFilter += " AND m.scope IN (" + placeholders + ")"
 	}
 
-	// 如果有向量，执行向量搜索
+	var vectorResults []SearchResult
+	var bm25Results []SearchResult
+
+	// 向量搜索
 	if len(queryVec) > 0 {
 		sql := `
 			SELECT m.id, m.text, v.vector, m.abstract, m.overview,
@@ -367,7 +383,6 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 		}
 		defer rows.Close()
 
-		var candidates []SearchResult
 		for rows.Next() {
 			var m Memory
 			var vectorBlob []byte
@@ -393,79 +408,95 @@ func (s *sqliteStore) searchGlobalMemories(queryVec []float32, query string, lim
 			}
 			m.Vector = vec
 			score := float64(CosineSimilarity(queryVec, m.Vector))
-			candidates = append(candidates, SearchResult{Entry: m, Score: score})
+			vectorResults = append(vectorResults, SearchResult{Entry: m, Score: score})
 		}
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
 
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].Score > candidates[j].Score
+		sort.Slice(vectorResults, func(i, j int) bool {
+			return vectorResults[i].Score > vectorResults[j].Score
 		})
-
-		if len(candidates) > limit {
-			return candidates[:limit], nil
+		if len(vectorResults) > limit*CandidateMultiplier {
+			vectorResults = vectorResults[:limit*CandidateMultiplier]
 		}
-		return candidates, nil
 	}
 
-	// 纯 BM25 搜索
-	query = EscapeFTS5Query(query)
+	// BM25 搜索（当有查询文本时始终执行，即使也有向量）
+	if query != "" {
+		escaped := EscapeFTS5Query(query)
 
-	sql := `
-		SELECT m.id, m.text, m.abstract, m.overview,
-			m.category, m.scope, m.importance, m.timestamp, m.metadata,
-			m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
-			m.source_file, m.chunk_index, m.token_count,
-			m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
-			m.source_conv, m.content_hash, m.expired,
-			rank as score
-		FROM fts_memories
-		JOIN memories m ON fts_memories.memory_id = m.id
-		WHERE fts_memories MATCH ?` + scopeFilter + `
-		ORDER BY score ASC
-		LIMIT ?`
+		sql := `
+			SELECT m.id, m.text, m.abstract, m.overview,
+				m.category, m.scope, m.importance, m.timestamp, m.metadata,
+				m.hierarchy_path, m.hierarchy_level, m.parent_id, m.node_type,
+				m.source_file, m.chunk_index, m.token_count,
+				m.memory_type, m.confidence, m.access_count, m.last_accessed, m.expires_at,
+				m.source_conv, m.content_hash, m.expired,
+				rank as score
+			FROM fts_memories
+			JOIN memories m ON fts_memories.memory_id = m.id
+			WHERE fts_memories MATCH ?` + scopeFilter + `
+			ORDER BY score ASC
+			LIMIT ?`
 
-	args := []interface{}{query}
-	if len(scopes) > 0 {
-		args = append(args, convertToInterfaces(scopes)...)
-	}
-	args = append(args, limit)
-
-	rows, err := s.db.Query(sql, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []SearchResult
-	for rows.Next() {
-		var m Memory
-		var score float64
-		var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
-		var tokenCount *int
-		var sourceConv, contentHash *string
-		var expired int
-		if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
-			&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
-			&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
-			&sourceFile, &m.ChunkIndex, &tokenCount,
-			&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
-			&sourceConv, &contentHash, &expired,
-			&score); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to scan row in searchGlobalMemories BM25: %v\n", err)
-			continue
+		args := []interface{}{escaped}
+		if len(scopes) > 0 {
+			args = append(args, convertToInterfaces(scopes)...)
 		}
-		assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
-		assignMemSysNullable(&m, sourceConv, contentHash, expired)
-		// BM25 score is negative (smaller-is-better), convert to positive
-		results = append(results, SearchResult{Entry: m, Score: -score})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		args = append(args, limit*CandidateMultiplier)
+
+		rows, err := s.db.Query(sql, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var m Memory
+			var score float64
+			var abstract, overview, hierarchyPath, parentID, nodeType, sourceFile *string
+			var tokenCount *int
+			var sourceConv, contentHash *string
+			var expired int
+			if err := rows.Scan(&m.ID, &m.Text, &abstract, &overview,
+				&m.Category, &m.Scope, &m.Importance, &m.Timestamp, &m.Metadata,
+				&hierarchyPath, &m.HierarchyLevel, &parentID, &nodeType,
+				&sourceFile, &m.ChunkIndex, &tokenCount,
+				&m.MemoryType, &m.Confidence, &m.AccessCount, &m.LastAccessed, &m.ExpiresAt,
+				&sourceConv, &contentHash, &expired,
+				&score); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to scan row in searchGlobalMemories BM25: %v\n", err)
+				continue
+			}
+			assignNullableFields(&m, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
+			assignMemSysNullable(&m, sourceConv, contentHash, expired)
+			// BM25 score is negative (smaller-is-better), convert to positive
+			bm25Results = append(bm25Results, SearchResult{Entry: m, Score: -score})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
-	return results, nil
+	// 当两路结果都有时，用 RRF 融合；否则直接返回
+	if len(vectorResults) > 0 && len(bm25Results) > 0 {
+		fused := rrfFusion(vectorResults, bm25Results)
+		if len(fused) > limit {
+			return fused[:limit], nil
+		}
+		return fused, nil
+	}
+	if len(vectorResults) > 0 {
+		if len(vectorResults) > limit {
+			return vectorResults[:limit], nil
+		}
+		return vectorResults, nil
+	}
+	if len(bm25Results) > limit {
+		return bm25Results[:limit], nil
+	}
+	return bm25Results, nil
 }
 
 // applyScoring 应用评分管道

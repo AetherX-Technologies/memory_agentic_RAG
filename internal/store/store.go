@@ -142,9 +142,11 @@ func New(config Config) (Store, error) {
 	} else {
 		db.SetMaxOpenConns(MaxOpenConnections)
 	}
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to enable WAL: %w", err)
+	if config.DBPath != ":memory:" {
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to enable WAL: %w", err)
+		}
 	}
 
 	// 初始化表结构
@@ -336,10 +338,12 @@ func (s *sqliteStore) Get(id string) (*Memory, error) {
 	var tokenCount *int
 	var sourceConv, contentHash *string
 	var expired int
+	var connections *string
 	err := s.db.QueryRow(`
 		SELECT id, text, abstract, overview, category, scope, importance, timestamp, metadata,
 			hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count,
-			memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired
+			memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired,
+			deleted_at, connections
 		FROM memories WHERE id = ?`, id).Scan(
 		&memory.ID, &memory.Text, &abstract, &overview,
 		&memory.Category, &memory.Scope,
@@ -347,12 +351,16 @@ func (s *sqliteStore) Get(id string) (*Memory, error) {
 		&hierarchyPath, &memory.HierarchyLevel,
 		&parentID, &nodeType, &sourceFile, &memory.ChunkIndex, &tokenCount,
 		&memory.MemoryType, &memory.Confidence, &memory.AccessCount, &memory.LastAccessed, &memory.ExpiresAt,
-		&sourceConv, &contentHash, &expired)
+		&sourceConv, &contentHash, &expired,
+		&memory.DeletedAt, &connections)
 	if err != nil {
 		return nil, err
 	}
 	assignNullableFields(memory, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile, tokenCount)
 	assignMemSysNullable(memory, sourceConv, contentHash, expired)
+	if connections != nil {
+		memory.Connections = *connections
+	}
 
 	// 读取向量
 	var vectorData []byte
@@ -382,7 +390,7 @@ func (s *sqliteStore) List(scope string, limit int) ([]*Memory, error) {
 	query := `SELECT id, text, abstract, overview, category, scope, importance, timestamp, metadata,
 		hierarchy_path, hierarchy_level, parent_id, node_type, source_file, chunk_index, token_count,
 		memory_type, confidence, access_count, last_accessed, expires_at, source_conv, content_hash, expired
-		FROM memories WHERE scope = ? ORDER BY timestamp DESC LIMIT ?`
+		FROM memories WHERE scope = ? AND deleted_at = 0 ORDER BY timestamp DESC LIMIT ?`
 	rows, err := s.db.Query(query, scope, limit)
 	if err != nil {
 		return nil, err
@@ -476,8 +484,12 @@ func (s *sqliteStore) UpdateConfidence(id string, delta float64) error {
 
 // UpdateImportance sets the importance of a memory, clamped to [0, 1].
 func (s *sqliteStore) UpdateImportance(id string, importance float64) error {
-	if importance < 0 { importance = 0 }
-	if importance > 1 { importance = 1 }
+	if importance < 0 {
+		importance = 0
+	}
+	if importance > 1 {
+		importance = 1
+	}
 	_, err := s.db.Exec(`UPDATE memories SET importance = ? WHERE id = ?`, importance, id)
 	return err
 }
@@ -664,11 +676,15 @@ func (s *sqliteStore) GetMemoryIDsByTag(tag string) ([]string, error) {
 
 // ListUnconsolidated returns memories not yet consolidated (category=memory, not deleted).
 func (s *sqliteStore) ListUnconsolidated(limit int) ([]*Memory, error) {
-	if limit <= 0 { limit = 50 }
+	if limit <= 0 {
+		limit = 50
+	}
 	rows, err := s.db.Query(`SELECT id, text, memory_type, importance, confidence, timestamp
 		FROM memories WHERE consolidated = 0 AND deleted_at = 0 AND expired = 0 AND category = 'memory'
 		ORDER BY timestamp DESC LIMIT ?`, limit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var result []*Memory
 	for rows.Next() {
@@ -691,7 +707,9 @@ func (s *sqliteStore) CountUnconsolidated() (int64, error) {
 // MarkConsolidated marks memories as consolidated.
 func (s *sqliteStore) MarkConsolidated(ids []string) error {
 	tx, err := s.db.Begin()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	for _, id := range ids {
 		if _, err := tx.Exec(`UPDATE memories SET consolidated = 1 WHERE id = ?`, id); err != nil {
@@ -717,10 +735,14 @@ func (s *sqliteStore) CreateConsolidation(c *Consolidation) (string, error) {
 
 // ListConsolidations returns recent consolidations.
 func (s *sqliteStore) ListConsolidations(limit int) ([]*Consolidation, error) {
-	if limit <= 0 { limit = 10 }
+	if limit <= 0 {
+		limit = 10
+	}
 	rows, err := s.db.Query(`SELECT id, source_ids, summary, insight, patterns, connections, created_at
 		FROM consolidations ORDER BY created_at DESC LIMIT ?`, limit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var result []*Consolidation
 	for rows.Next() {
@@ -737,16 +759,43 @@ func (s *sqliteStore) ListConsolidations(limit int) ([]*Consolidation, error) {
 func (s *sqliteStore) AddConnection(memoryID, linkedTo, relationship string) error {
 	var connJSON string
 	err := s.db.QueryRow(`SELECT connections FROM memories WHERE id = ?`, memoryID).Scan(&connJSON)
-	if err != nil { return err }
-	if connJSON == "" { connJSON = "[]" }
+	if err != nil {
+		return err
+	}
+	if connJSON == "" {
+		connJSON = "[]"
+	}
 
 	var conns []map[string]string
-	json.Unmarshal([]byte(connJSON), &conns)
+	if err := json.Unmarshal([]byte(connJSON), &conns); err != nil {
+		return fmt.Errorf("failed to parse existing connections: %w", err)
+	}
+	// Prevent duplicate links; update relationship if new one is more specific
+	for i, c := range conns {
+		if c["linked_to"] == linkedTo {
+			oldIsGeneric := strings.HasPrefix(c["relationship"], "related (sim=")
+			newIsGeneric := strings.HasPrefix(relationship, "related (sim=")
+			// Upgrade: replace generic label with specific one from consolidation
+			if oldIsGeneric && !newIsGeneric && relationship != "" {
+				conns[i]["relationship"] = relationship
+				updated, err := json.Marshal(conns)
+				if err != nil {
+					return fmt.Errorf("failed to marshal connections: %w", err)
+				}
+				_, err = s.db.Exec(`UPDATE memories SET connections = ? WHERE id = ?`, string(updated), memoryID)
+				return err
+			}
+			return nil // already connected with adequate label
+		}
+	}
 	conns = append(conns, map[string]string{
 		"linked_to":    linkedTo,
 		"relationship": relationship,
 	})
-	updated, _ := json.Marshal(conns)
+	updated, err := json.Marshal(conns)
+	if err != nil {
+		return fmt.Errorf("failed to marshal connections: %w", err)
+	}
 	_, err = s.db.Exec(`UPDATE memories SET connections = ? WHERE id = ?`, string(updated), memoryID)
 	return err
 }
@@ -824,19 +873,37 @@ func scanMemories(rows *sql.Rows) ([]*Memory, error) {
 
 // assignNullableFields copies nullable scan results into the Memory struct.
 func assignNullableFields(m *Memory, hierarchyPath, abstract, overview, parentID, nodeType, sourceFile *string, tokenCount *int) {
-	if hierarchyPath != nil { m.HierarchyPath = *hierarchyPath }
-	if abstract != nil { m.Abstract = *abstract }
-	if overview != nil { m.Overview = *overview }
-	if parentID != nil { m.ParentID = *parentID }
-	if nodeType != nil { m.NodeType = *nodeType }
-	if sourceFile != nil { m.SourceFile = *sourceFile }
-	if tokenCount != nil { m.TokenCount = *tokenCount }
+	if hierarchyPath != nil {
+		m.HierarchyPath = *hierarchyPath
+	}
+	if abstract != nil {
+		m.Abstract = *abstract
+	}
+	if overview != nil {
+		m.Overview = *overview
+	}
+	if parentID != nil {
+		m.ParentID = *parentID
+	}
+	if nodeType != nil {
+		m.NodeType = *nodeType
+	}
+	if sourceFile != nil {
+		m.SourceFile = *sourceFile
+	}
+	if tokenCount != nil {
+		m.TokenCount = *tokenCount
+	}
 }
 
 // assignMemSysNullable copies nullable memory-system scan results into the Memory struct.
 func assignMemSysNullable(m *Memory, sourceConv, contentHash *string, expired int) {
-	if sourceConv != nil { m.SourceConv = *sourceConv }
-	if contentHash != nil { m.ContentHash = *contentHash }
+	if sourceConv != nil {
+		m.SourceConv = *sourceConv
+	}
+	if contentHash != nil {
+		m.ContentHash = *contentHash
+	}
 	m.Expired = expired != 0
 }
 

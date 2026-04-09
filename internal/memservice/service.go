@@ -106,10 +106,10 @@ type ForgetResponse struct {
 }
 
 type UpdateRequest struct {
-	ID         string   `json:"id"`
-	Content    string   `json:"content"`
-	Importance *float64 `json:"importance"`
-	Tags       []string `json:"tags"`
+	ID         string    `json:"id"`
+	Content    string    `json:"content"`
+	Importance *float64  `json:"importance"`
+	Tags       *[]string `json:"tags"` // nil = keep existing, empty = clear, non-empty = replace
 }
 
 type UpdateResponse struct {
@@ -125,13 +125,14 @@ type ExportRequest struct {
 }
 
 type ExportedMemory struct {
-	ID         string  `json:"id"`
-	Content    string  `json:"content"`
-	Type       string  `json:"type"`
-	Importance float64 `json:"importance"`
-	Confidence float64 `json:"confidence"`
-	Timestamp  int64   `json:"timestamp"`
-	SourceConv string  `json:"source_conv,omitempty"`
+	ID         string   `json:"id"`
+	Content    string   `json:"content"`
+	Type       string   `json:"type"`
+	Importance float64  `json:"importance"`
+	Confidence float64  `json:"confidence"`
+	Timestamp  int64    `json:"timestamp"`
+	SourceConv string   `json:"source_conv,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
 }
 
 type ExportResponse struct {
@@ -144,12 +145,13 @@ type ImportRequest struct {
 }
 
 type ImportMemory struct {
-	Content    string  `json:"content"`
-	Type       string  `json:"type"`
-	Importance float64 `json:"importance"`
-	Confidence float64 `json:"confidence"`
-	Timestamp  int64   `json:"timestamp"`
-	SourceConv string  `json:"source_conv"`
+	Content    string   `json:"content"`
+	Type       string   `json:"type"`
+	Importance float64  `json:"importance"`
+	Confidence float64  `json:"confidence"`
+	Timestamp  int64    `json:"timestamp"`
+	SourceConv string   `json:"source_conv"`
+	Tags       []string `json:"tags,omitempty"`
 }
 
 type ImportResponse struct {
@@ -314,8 +316,13 @@ func (s *Service) Store(_ context.Context, req StoreRequest) (*StoreResponse, er
 		if err != nil {
 			return nil, classifyStoreError("store memory", err)
 		}
-		if result.ID != "" && len(req.Tags) > 0 {
-			_ = s.store.SetTags(result.ID, req.Tags)
+		// Persist tags: on new memory use ID, on duplicate use OldID
+		targetID := result.ID
+		if targetID == "" {
+			targetID = result.OldID
+		}
+		if targetID != "" && len(req.Tags) > 0 {
+			_ = s.store.SetTags(targetID, req.Tags)
 		}
 		return &StoreResponse{
 			ID:     result.ID,
@@ -544,13 +551,23 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 				return nil, &ToolError{Code: ErrorCodeInternal, Message: "failed to update importance", Err: err}
 			}
 		}
-		if len(req.Tags) > 0 {
-			_ = s.store.SetTags(req.ID, req.Tags)
+		if req.Tags != nil {
+			_ = s.store.SetTags(req.ID, *req.Tags)
 		}
 		return &UpdateResponse{
 			ID:     req.ID,
 			Status: "updated",
 		}, nil
+	}
+
+	// Carry over existing tags if caller doesn't provide new ones
+	var tagsToSet []string
+	if req.Tags != nil {
+		tagsToSet = *req.Tags // explicit: use provided (including empty = clear)
+	} else {
+		if existingTags, err := s.store.GetTags(req.ID); err == nil {
+			tagsToSet = existingTags
+		}
 	}
 
 	now := time.Now().Unix()
@@ -590,8 +607,8 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		}
 		if result.ID != "" {
 			_ = s.store.RecordSupersession(req.ID, result.ID)
-			if len(req.Tags) > 0 {
-				_ = s.store.SetTags(result.ID, req.Tags)
+			if len(tagsToSet) > 0 {
+				_ = s.store.SetTags(result.ID, tagsToSet)
 			}
 		}
 		return &UpdateResponse{
@@ -631,8 +648,8 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		return nil, &ToolError{Code: ErrorCodeInternal, Message: "record supersession", Err: err}
 	}
 
-	if len(req.Tags) > 0 {
-		_ = s.store.SetTags(newID, req.Tags)
+	if len(tagsToSet) > 0 {
+		_ = s.store.SetTags(newID, tagsToSet)
 	}
 
 	return &UpdateResponse{
@@ -656,6 +673,7 @@ func (s *Service) Export(_ context.Context, req ExportRequest) (*ExportResponse,
 		if len(req.Types) > 0 && !contains(req.Types, m.MemoryType) {
 			continue
 		}
+		tags, _ := s.store.GetTags(m.ID)
 		exported = append(exported, ExportedMemory{
 			ID:         m.ID,
 			Content:    m.Text,
@@ -664,6 +682,7 @@ func (s *Service) Export(_ context.Context, req ExportRequest) (*ExportResponse,
 			Confidence: m.Confidence,
 			Timestamp:  m.Timestamp,
 			SourceConv: m.SourceConv,
+			Tags:       tags,
 		})
 	}
 
@@ -717,9 +736,13 @@ func (s *Service) Import(_ context.Context, req ImportRequest) (*ImportResponse,
 			}
 		}
 
-		if _, err := s.store.Insert(mem); err != nil {
+		id, err := s.store.Insert(mem)
+		if err != nil {
 			skipped++
 			continue
+		}
+		if len(m.Tags) > 0 {
+			_ = s.store.SetTags(id, m.Tags)
 		}
 		imported++
 	}

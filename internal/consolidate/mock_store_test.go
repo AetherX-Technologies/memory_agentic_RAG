@@ -65,5 +65,6 @@ func (m *mockConsolidateStore) ListTrash(limit int) ([]*store.Memory, error)    
 func (m *mockConsolidateStore) PermanentDelete(id string) error                       { return nil }
 func (m *mockConsolidateStore) RunCleanup(now int64) error                            { return nil }
 func (m *mockConsolidateStore) SetTags(memoryID string, tags []string) error          { return nil }
+func (m *mockConsolidateStore) GetTags(memoryID string) ([]string, error)             { return nil, nil }
 func (m *mockConsolidateStore) GetMemoryIDsByTag(tag string) ([]string, error)        { return nil, nil }
 func (m *mockConsolidateStore) Close() error                                          { return nil }

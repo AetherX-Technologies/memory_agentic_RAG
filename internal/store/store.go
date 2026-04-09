@@ -101,6 +101,7 @@ type Store interface {
 	PermanentDelete(id string) error
 	RunCleanup(now int64) error
 	SetTags(memoryID string, tags []string) error
+	GetTags(memoryID string) ([]string, error)
 	GetMemoryIDsByTag(tag string) ([]string, error)
 	// Phase G: Consolidation
 	ListUnconsolidated(limit int) ([]*Memory, error)
@@ -651,6 +652,24 @@ func (s *sqliteStore) SetTags(memoryID string, tags []string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// GetTags returns all tags for a memory.
+func (s *sqliteStore) GetTags(memoryID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT tag FROM memory_tags WHERE memory_id = ?`, memoryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
 }
 
 // GetMemoryIDsByTag returns memory IDs that have the given tag.

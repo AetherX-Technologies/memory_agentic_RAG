@@ -25,6 +25,7 @@ var allToolDefinitions = []map[string]interface{}{
 			"properties": map[string]interface{}{
 				"content": map[string]string{"type": "string", "description": "The memory content to store"},
 				"type":    map[string]interface{}{"type": "string", "enum": []string{"fact", "preference", "skill", "episode", "instruction", "relationship"}},
+				"tags":    map[string]interface{}{"type": "array", "items": map[string]string{"type": "string"}, "description": "Optional tags for categorization (e.g. [\"Go\", \"backend\"])"},
 			},
 			"required": []string{"content"},
 		},
@@ -62,6 +63,7 @@ var allToolDefinitions = []map[string]interface{}{
 				"id":         map[string]string{"type": "string", "description": "Memory ID"},
 				"content":    map[string]string{"type": "string", "description": "New content"},
 				"importance": map[string]string{"type": "number", "description": "Importance 0-1"},
+				"tags":       map[string]interface{}{"type": "array", "items": map[string]string{"type": "string"}, "description": "Replace tags (omit to keep existing)"},
 			},
 			"required": []string{"id"},
 		},

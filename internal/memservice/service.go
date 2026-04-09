@@ -615,7 +615,7 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		}
 		if result.ID != "" {
 			_ = s.store.RecordSupersession(req.ID, result.ID)
-			if len(tagsToSet) > 0 {
+			if req.Tags != nil || len(tagsToSet) > 0 {
 				_ = s.store.SetTags(result.ID, tagsToSet)
 			}
 		}
@@ -656,7 +656,7 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 		return nil, &ToolError{Code: ErrorCodeInternal, Message: "record supersession", Err: err}
 	}
 
-	if len(tagsToSet) > 0 {
+	if req.Tags != nil || len(tagsToSet) > 0 {
 		_ = s.store.SetTags(newID, tagsToSet)
 	}
 

@@ -231,8 +231,17 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 	if err != nil {
 		// Check if it's a content_hash UNIQUE constraint violation
 		if strings.Contains(err.Error(), "UNIQUE constraint") && strings.Contains(err.Error(), "content_hash") {
+			// Try to find the existing memory ID for tag persistence
+			var existingID string
+			for _, c := range candidates {
+				if c.Entry.ContentHash == mem.ContentHash {
+					existingID = c.Entry.ID
+					break
+				}
+			}
 			return Result{
 				Action: "duplicate",
+				OldID:  existingID,
 				Reason: "content_hash UNIQUE constraint (exact duplicate not in vector index)",
 			}, nil
 		}

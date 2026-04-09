@@ -76,6 +76,7 @@ type RecallRequest struct {
 	Types         []string `json:"types"`
 	MinImportance float64  `json:"min_importance"`
 	MaxTokens     int      `json:"max_tokens"`
+	SourceConv    string   `json:"source_conv,omitempty"` // filter by conversation ID
 }
 
 type RecallOptions struct {
@@ -411,13 +412,20 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 		queryText = store.EscapeFTS5Query(queryText)
 	}
 
-	results, err := s.store.Search(queryVec, queryText, opts.CurrentPath, req.Limit*3, opts.Scopes)
+	searchLimit := req.Limit * 3
+	if req.SourceConv != "" {
+		searchLimit = req.Limit * 10 // widen pool when filtering by conversation
+	}
+	results, err := s.store.Search(queryVec, queryText, opts.CurrentPath, searchLimit, opts.Scopes)
 	if err != nil {
 		return nil, &ToolError{Code: ErrorCodeInternal, Message: "search failed", Err: err}
 	}
 
 	filtered := make([]store.SearchResult, 0, len(results))
 	for _, r := range results {
+		if req.SourceConv != "" && r.Entry.SourceConv != req.SourceConv {
+			continue
+		}
 		if req.MinImportance > 0 && r.Entry.Importance < req.MinImportance {
 			continue
 		}
@@ -438,7 +446,7 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 	}
 
 	// Step: expand connections from top hits
-	connMemories := s.expandConnections(filtered, req.Limit)
+	connMemories := s.expandConnections(filtered, req.Limit, req.SourceConv)
 
 	// First check if we have insights to show, then allocate budget accordingly
 	consolidations, err := s.store.ListConsolidations(5)
@@ -904,7 +912,7 @@ func (s *Service) autoStore(text string, reason trigger.CaptureReason) {
 
 // expandConnections fetches connected memories for the top search hits.
 // Returns unique connected memories that are not already in the result set.
-func (s *Service) expandConnections(results []store.SearchResult, maxConnected int) []*store.Memory {
+func (s *Service) expandConnections(results []store.SearchResult, maxConnected int, filterSourceConv string) []*store.Memory {
 	if len(results) == 0 || maxConnected <= 0 {
 		return nil
 	}
@@ -947,6 +955,10 @@ func (s *Service) expandConnections(results []store.SearchResult, maxConnected i
 			}
 			// Skip expired-but-not-yet-cleaned memories
 			if linked.ExpiresAt > 0 && linked.ExpiresAt < time.Now().Unix() {
+				continue
+			}
+			// Respect source_conv filter if set
+			if filterSourceConv != "" && linked.SourceConv != filterSourceConv {
 				continue
 			}
 

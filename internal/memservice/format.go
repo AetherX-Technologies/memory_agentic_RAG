@@ -134,11 +134,15 @@ func formatContext(results []store.SearchResult, maxTokens int) string {
 
 func formatMemoryLine(result store.SearchResult, memType string) string {
 	text := strings.ReplaceAll(result.Entry.Text, "\n", " ")
+	suffix := ""
+	if result.Entry.SourceConv != "" {
+		suffix = fmt.Sprintf(" [conv:%s]", result.Entry.SourceConv)
+	}
 	if memType == "episode" && result.Entry.Timestamp > 0 {
 		date := time.Unix(result.Entry.Timestamp, 0).Format("2006-01-02")
-		return fmt.Sprintf("- [%s] %s\n", date, text)
+		return fmt.Sprintf("- [%s] %s%s\n", date, text, suffix)
 	}
-	return fmt.Sprintf("- %s\n", text)
+	return fmt.Sprintf("- %s%s\n", text, suffix)
 }
 
 func estimateTokens(s string) int {

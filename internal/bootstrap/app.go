@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/yourusername/hybridmem-rag/internal/config"
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
@@ -71,6 +72,17 @@ func Load() (*App, error) {
 	app.Embedder = emb
 	if closeEmbedder != nil {
 		app.closeFuncs = append(app.closeFuncs, closeEmbedder)
+	}
+
+	// Set dedup profile based on detected embedder provider.
+	// This must be set before mcp.New or api.NewHandlerWithDeps is called,
+	// because they read dedup.DefaultConfig() which picks up this env var.
+	if emb != nil {
+		embedProvider := envOr("MEMORY_EMBED_PROVIDER", cfg.Embedding.Provider)
+		profile := detectDedupProfile(embedProvider, cfg)
+		if profile != "" {
+			os.Setenv("MEMORY_EMBEDDER_PROFILE", profile)
+		}
 	}
 
 	// Load FastText should_capture models (CJK + EN, both required)
@@ -221,6 +233,27 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// detectDedupProfile picks the right dedup threshold profile based on embedder provider + model.
+// Returns "" for unknown combinations, which means the generic profile is used.
+func detectDedupProfile(provider string, cfg *config.AppConfig) string {
+	switch provider {
+	case "local":
+		// Local ONNX — currently only Qwen3-0.6B is supported
+		return "qwen3-local"
+	case "jina":
+		model := envOr("MEMORY_EMBED_MODEL", cfg.Embedding.Jina.Model)
+		if strings.Contains(model, "v3") || model == "" {
+			return "jina-v3"
+		}
+	case "openai":
+		model := envOr("MEMORY_EMBED_MODEL", cfg.Embedding.OpenAI.Model)
+		if strings.Contains(model, "text-embedding-3") || model == "" {
+			return "openai-v3"
+		}
+	}
+	return "" // generic
 }
 
 func fileExists(path string) bool {

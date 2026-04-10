@@ -42,21 +42,65 @@ type Config struct {
 	MaxConnections   int     // max connections per store operation (default: 3)
 }
 
-// DefaultConfig returns sensible defaults.
+// Profile identifies embedder-specific threshold tuning.
+// Different embedding models have very different cosine similarity distributions,
+// so a single set of thresholds cannot serve all providers.
+type Profile string
+
+const (
+	ProfileGeneric    Profile = "generic"     // Conservative defaults, safe for unknown models
+	ProfileQwen3Local Profile = "qwen3-local" // Calibrated for Qwen3-0.6B ONNX (local)
+	ProfileJinaV3     Profile = "jina-v3"     // Jina embeddings v3 (1024d)
+	ProfileOpenAI3    Profile = "openai-v3"   // OpenAI text-embedding-3-small (1536d)
+)
+
+// DefaultConfig returns sensible defaults for the profile indicated by
+// MEMORY_EMBEDDER_PROFILE env var (set by bootstrap). Falls back to generic.
 // LLM settings are read from environment variables if available.
 func DefaultConfig() Config {
+	profile := Profile(os.Getenv("MEMORY_EMBEDDER_PROFILE"))
+	return DefaultConfigFor(profile)
+}
+
+// DefaultConfigFor returns threshold defaults calibrated for the given embedder profile.
+// Thresholds are based on real cosine distribution measurements — see cmd/calibration_test.
+func DefaultConfigFor(profile Profile) Config {
 	cfg := Config{
-		DupThreshold:      0.93,
-		ConflictThreshold: 0.85,
-		ShortTextTokens:   20,
-		LLMModel:          "gpt-4o-mini",
-		LLMEndpoint:       "https://api.openai.com/v1/chat/completions",
-		LLMTimeout:        15,
-		CandidateLimit:    20,
-		ConnectionMinSim:  0.70,
-		ConnectionMaxSim:  0.85,
-		MaxConnections:    3,
+		ShortTextTokens: 20,
+		LLMModel:        "gpt-4o-mini",
+		LLMEndpoint:     "https://api.openai.com/v1/chat/completions",
+		LLMTimeout:      15,
+		CandidateLimit:  20,
+		MaxConnections:  3,
 	}
+
+	// Apply profile-specific thresholds
+	switch profile {
+	case ProfileQwen3Local:
+		// Calibrated via cmd/calibration_test (44 pairs, Apr 2026):
+		//   DUPLICATE baseline: min=0.953
+		//   RELATED:            0.860-0.930
+		//   UNRELATED ceiling:  0.849
+		cfg.DupThreshold = 0.94
+		cfg.ConflictThreshold = 0.92
+		cfg.ConnectionMinSim = 0.86
+		cfg.ConnectionMaxSim = 0.94
+	case ProfileJinaV3, ProfileOpenAI3:
+		// Not yet calibrated — these models typically have better discrimination
+		// (lower baseline) so somewhat lower thresholds, but leave room for noise.
+		cfg.DupThreshold = 0.90
+		cfg.ConflictThreshold = 0.82
+		cfg.ConnectionMinSim = 0.72
+		cfg.ConnectionMaxSim = 0.90
+	default:
+		// Generic: conservative, assume unknown model. These are the original values
+		// and work acceptably across a wide range of models even if not optimal.
+		cfg.DupThreshold = 0.93
+		cfg.ConflictThreshold = 0.85
+		cfg.ConnectionMinSim = 0.70
+		cfg.ConnectionMaxSim = 0.85
+	}
+
 	// Pick up LLM config from environment (same vars as consolidation)
 	if key := os.Getenv("MEMORY_LLM_KEY"); key != "" {
 		cfg.LLMAPIKey = key
@@ -171,12 +215,19 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 		}
 	}
 
-	// Adaptive threshold for short text
+	// Adaptive threshold for short text.
+	// The adjustment is scaled by the gap between DupThreshold and a nominal ceiling (0.99),
+	// so high-baseline embedders (like Qwen3) get smaller adjustments.
 	dupThresh := d.config.DupThreshold
 	conflictThresh := d.config.ConflictThreshold
 	if estimateTokens(mem.Content) < d.config.ShortTextTokens {
-		dupThresh -= 0.05
-		conflictThresh -= 0.05
+		// Scale: 0.02 if DupThreshold >= 0.94 (high-baseline), 0.05 otherwise
+		adj := 0.05
+		if d.config.DupThreshold >= 0.94 {
+			adj = 0.02
+		}
+		dupThresh -= adj
+		conflictThresh -= adj
 	}
 
 	// Step 3: Check for duplicates and conflicts

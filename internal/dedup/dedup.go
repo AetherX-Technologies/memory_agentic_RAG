@@ -231,10 +231,10 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 	if err != nil {
 		// Check if it's a content_hash UNIQUE constraint violation
 		if strings.Contains(err.Error(), "UNIQUE constraint") && strings.Contains(err.Error(), "content_hash") {
-			// Try to find the existing memory ID for tag persistence
+			// Find existing memory ID — search all candidates (including cross-type)
 			var existingID string
 			for _, c := range candidates {
-				if c.Entry.ContentHash == mem.ContentHash {
+				if c.Entry.ContentHash != "" && c.Entry.ContentHash == mem.ContentHash {
 					existingID = c.Entry.ID
 					break
 				}
@@ -295,10 +295,14 @@ func (d *Deduplicator) buildConnectionsFiltered(newID string, candidates []store
 
 // insertMemory converts ExtractedMemory to store.Memory and inserts it.
 func (d *Deduplicator) insertMemory(mem extractor.ExtractedMemory, vec []float32) (string, error) {
+	scope := mem.Scope
+	if scope == "" {
+		scope = "global"
+	}
 	m := &store.Memory{
 		Text:        mem.Content,
 		Category:    "memory",
-		Scope:       "global",
+		Scope:       scope,
 		Importance:  mem.Importance,
 		MemoryType:  mem.MemoryType,
 		Confidence:  mem.Confidence,

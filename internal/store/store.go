@@ -775,9 +775,16 @@ func (s *sqliteStore) ListConsolidations(limit int) ([]*Consolidation, error) {
 }
 
 // AddConnection adds a connection to a memory (safe JSON encoding).
+// Uses a transaction to prevent lost updates under concurrent writes.
 func (s *sqliteStore) AddConnection(memoryID, linkedTo, relationship string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	var connJSON string
-	err := s.db.QueryRow(`SELECT connections FROM memories WHERE id = ?`, memoryID).Scan(&connJSON)
+	err = tx.QueryRow(`SELECT connections FROM memories WHERE id = ?`, memoryID).Scan(&connJSON)
 	if err != nil {
 		return err
 	}
@@ -801,8 +808,11 @@ func (s *sqliteStore) AddConnection(memoryID, linkedTo, relationship string) err
 				if err != nil {
 					return fmt.Errorf("failed to marshal connections: %w", err)
 				}
-				_, err = s.db.Exec(`UPDATE memories SET connections = ? WHERE id = ?`, string(updated), memoryID)
-				return err
+				_, err = tx.Exec(`UPDATE memories SET connections = ? WHERE id = ?`, string(updated), memoryID)
+				if err != nil {
+					return err
+				}
+				return tx.Commit()
 			}
 			return nil // already connected with adequate label
 		}
@@ -815,8 +825,11 @@ func (s *sqliteStore) AddConnection(memoryID, linkedTo, relationship string) err
 	if err != nil {
 		return fmt.Errorf("failed to marshal connections: %w", err)
 	}
-	_, err = s.db.Exec(`UPDATE memories SET connections = ? WHERE id = ?`, string(updated), memoryID)
-	return err
+	_, err = tx.Exec(`UPDATE memories SET connections = ? WHERE id = ?`, string(updated), memoryID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // scanMemoriesWithVector scans rows from a query that includes a trailing v.vector column (nullable).

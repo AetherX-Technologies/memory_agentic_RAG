@@ -416,6 +416,9 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 	if req.SourceConv != "" {
 		searchLimit = req.Limit * 10 // widen pool when filtering by conversation
 	}
+	if searchLimit > 100 {
+		searchLimit = 100 // respect hierarchical search limit
+	}
 	results, err := s.store.Search(queryVec, queryText, opts.CurrentPath, searchLimit, opts.Scopes)
 	if err != nil {
 		return nil, &ToolError{Code: ErrorCodeInternal, Message: "search failed", Err: err}
@@ -446,7 +449,7 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 	}
 
 	// Step: expand connections from top hits
-	connMemories := s.expandConnections(filtered, req.Limit, req.SourceConv)
+	connMemories := s.expandConnections(filtered, req.Limit, req.SourceConv, req.Types, req.MinImportance)
 
 	// First check if we have insights to show, then allocate budget accordingly
 	consolidations, err := s.store.ListConsolidations(5)
@@ -549,7 +552,7 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 
 	existing, err := s.store.Get(req.ID)
 	if err != nil {
-		return nil, notFound("memory not found", err)
+		return nil, classifyStoreError("get memory for update", err)
 	}
 
 	contentChanged := req.Content != "" && req.Content != existing.Text
@@ -600,6 +603,7 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 			Confidence:  existing.Confidence,
 			ContentHash: contentHash,
 			SourceConv:  existing.SourceConv,
+			Scope:       existing.Scope,
 		})
 		if err != nil {
 			_ = s.store.Restore(req.ID)
@@ -653,7 +657,8 @@ func (s *Service) Update(_ context.Context, req UpdateRequest) (*UpdateResponse,
 	}
 
 	if err := s.store.RecordSupersession(req.ID, newID); err != nil {
-		return nil, &ToolError{Code: ErrorCodeInternal, Message: "record supersession", Err: err}
+		// Non-fatal: old memory is soft-deleted and new one stored; just log the link failure
+		fmt.Fprintf(os.Stderr, "[memory] supersession link %s→%s failed: %v\n", req.ID[:8], newID[:8], err)
 	}
 
 	if req.Tags != nil || len(tagsToSet) > 0 {
@@ -912,7 +917,7 @@ func (s *Service) autoStore(text string, reason trigger.CaptureReason) {
 
 // expandConnections fetches connected memories for the top search hits.
 // Returns unique connected memories that are not already in the result set.
-func (s *Service) expandConnections(results []store.SearchResult, maxConnected int, filterSourceConv string) []*store.Memory {
+func (s *Service) expandConnections(results []store.SearchResult, maxConnected int, filterSourceConv string, filterTypes []string, filterMinImportance float64) []*store.Memory {
 	if len(results) == 0 || maxConnected <= 0 {
 		return nil
 	}
@@ -959,6 +964,13 @@ func (s *Service) expandConnections(results []store.SearchResult, maxConnected i
 			}
 			// Respect source_conv filter if set
 			if filterSourceConv != "" && linked.SourceConv != filterSourceConv {
+				continue
+			}
+			// Respect type and importance filters from the original query
+			if len(filterTypes) > 0 && !contains(filterTypes, linked.MemoryType) {
+				continue
+			}
+			if filterMinImportance > 0 && linked.Importance < filterMinImportance {
 				continue
 			}
 

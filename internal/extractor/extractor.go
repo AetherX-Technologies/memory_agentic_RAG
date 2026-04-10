@@ -51,6 +51,7 @@ type ExtractedMemory struct {
 	Tags        []string
 	ContentHash string // SHA256[:16] for dedup
 	SourceConv  string // Conversation ID
+	Scope       string // "global" by default, preserved on update
 }
 
 // Message represents a single message in a conversation.

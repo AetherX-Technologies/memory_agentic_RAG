@@ -33,6 +33,13 @@ func Load() (*App, error) {
 		dbPath = "memory.db"
 	}
 
+	// Ensure DB directory exists
+	if dbPath != ":memory:" {
+		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+			os.MkdirAll(dir, 0755)
+		}
+	}
+
 	storeCfg := cfg.ToStoreConfig()
 	storeCfg.DBPath = dbPath
 
@@ -73,7 +80,9 @@ func Load() (*App, error) {
 		app.closeFuncs = append(app.closeFuncs, closeEmbedder)
 	}
 
-	// Load FastText should_capture models (CJK + EN, both required)
+	// Load FastText should_capture models (CJK + EN).
+	// Non-fatal: if models are missing, ShouldCapture falls back to rule-based matching.
+	ftLoaded := 0
 	for _, ft := range []struct {
 		envKey, defaultPath string
 		initFn             func(string) error
@@ -90,9 +99,13 @@ func Load() (*App, error) {
 			}
 		}
 		if err := ft.initFn(ftPath); err != nil {
-			_ = app.Close()
-			return nil, fmt.Errorf("failed to load fasttext %s model: %w", ft.label, err)
+			fmt.Fprintf(os.Stderr, "[bootstrap] fasttext %s model not loaded: %v (falling back to rules)\n", ft.label, err)
+		} else {
+			ftLoaded++
 		}
+	}
+	if ftLoaded == 0 {
+		fmt.Fprintf(os.Stderr, "[bootstrap] no fasttext models loaded — ShouldCapture will use rule-based fallback\n")
 	}
 	app.closeFuncs = append(app.closeFuncs, func() error {
 		trigger.CloseFastText()
@@ -196,9 +209,10 @@ func loadConfig() (*config.AppConfig, error) {
 	configPath := envOr("MEMORY_CONFIG_PATH", "")
 	if configPath != "" {
 		cfg, err := config.Load(configPath)
-		if err == nil {
-			return cfg, nil
+		if err != nil {
+			return nil, fmt.Errorf("MEMORY_CONFIG_PATH=%s: %w", configPath, err)
 		}
+		return cfg, nil
 	}
 
 	exeDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))

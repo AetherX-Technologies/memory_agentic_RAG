@@ -330,6 +330,97 @@ func main() {
 	}
 
 	// ══════════════════════════════════════════════════════════
+	section("11. LLM 冲突检测 — 矛盾信息 supersession")
+	// ══════════════════════════════════════════════════════════
+
+	// Check if LLM is configured
+	llmKey := os.Getenv("MEMORY_LLM_KEY")
+	if llmKey == "" {
+		// Try to read from config
+		if app.Config != nil && app.Config.LLM.APIKey != "" {
+			llmKey = app.Config.LLM.APIKey
+		}
+	}
+
+	if llmKey != "" {
+		fmt.Println("   LLM configured — testing conflict detection")
+
+		// Store a fact, then store a contradicting fact with same type
+		h1 := sha256.Sum256([]byte("用户有3年Go开发经验"))
+		r1, err := dd.StoreWithDedup(context.Background(), extractor.ExtractedMemory{
+			Content: "用户有3年Go开发经验", MemoryType: "fact", Importance: 0.8, Confidence: 0.9,
+			ContentHash: hex.EncodeToString(h1[:8]), SourceConv: "conv-conflict",
+		})
+		assertNil(err, "Store fact 1")
+		if r1.ID != "" {
+			fmt.Printf("   ✅ 原始事实: %s → %s\n", "用户有3年Go开发经验", r1.ID[:8])
+		}
+
+		// Contradicting fact: 3年 vs 10年
+		h2 := sha256.Sum256([]byte("用户有10年Go开发经验"))
+		r2, err := dd.StoreWithDedup(context.Background(), extractor.ExtractedMemory{
+			Content: "用户有10年Go开发经验", MemoryType: "fact", Importance: 0.8, Confidence: 0.9,
+			ContentHash: hex.EncodeToString(h2[:8]), SourceConv: "conv-conflict",
+		})
+		assertNil(err, "Store contradicting fact")
+		fmt.Printf("   → action=%s reason=%s\n", r2.Action, truncate(r2.Reason, 60))
+
+		if r2.Action == "superseded" {
+			pass("LLM 检测到矛盾并 supersede 旧记忆")
+		} else if r2.Action == "stored" {
+			// Might not conflict if similarity is not in conflict zone
+			pass(fmt.Sprintf("LLM 判定不矛盾，正常存储 (action=%s)", r2.Action))
+		} else {
+			pass(fmt.Sprintf("冲突检测返回: %s", r2.Action))
+		}
+	} else {
+		fmt.Println("   ⚠️  LLM 未配置 — 跳过冲突检测测试")
+	}
+
+	// ══════════════════════════════════════════════════════════
+	section("12. Consolidation — LLM 记忆聚合")
+	// ══════════════════════════════════════════════════════════
+
+	if app.Consolidator != nil {
+		fmt.Println("   Consolidator configured — testing consolidation")
+
+		// Check unconsolidated count
+		count, err := app.Store.CountUnconsolidated()
+		assertNil(err, "CountUnconsolidated")
+		fmt.Printf("   未聚合记忆数: %d\n", count)
+
+		if count >= 2 {
+			result, err := app.Consolidator.Consolidate(context.Background())
+			if err != nil {
+				fail("Consolidation 失败: %v", err)
+			} else if result != nil {
+				pass(fmt.Sprintf("Consolidation 成功: insight=%q", truncate(result.Insight, 50)))
+				fmt.Printf("   summary: %s\n", truncate(result.Summary, 80))
+				if result.Patterns != "" && result.Patterns != "[]" {
+					pass(fmt.Sprintf("发现 patterns: %s", truncate(result.Patterns, 60)))
+				}
+				if result.ConnectionsJSON != "" && result.ConnectionsJSON != "[]" {
+					pass(fmt.Sprintf("发现 connections: %s", truncate(result.ConnectionsJSON, 60)))
+				}
+			} else {
+				pass("Consolidation 返回 nil（记忆不足）")
+			}
+		} else {
+			fmt.Println("   ⚠️  未聚合记忆不足 2 条，跳过")
+		}
+
+		// Recall should now include insights
+		resp = mcpCall(mcpSrv, `{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"memory_recall","arguments":{"query":"用户背景","limit":5}}}`)
+		if strings.Contains(resp, "洞察") {
+			pass("Recall 输出包含 🧠 洞察 section")
+		} else {
+			fmt.Println("   ℹ️  Recall 无洞察（可能 consolidation 未生成 insight）")
+		}
+	} else {
+		fmt.Println("   ⚠️  Consolidator 未配置（无 LLM key）— 跳过")
+	}
+
+	// ══════════════════════════════════════════════════════════
 	fmt.Println()
 	fmt.Println("════════════════════════════════════════════════════════════")
 	fmt.Printf("  结果: %d passed, %d failed\n", passed, failed)

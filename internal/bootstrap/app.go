@@ -186,6 +186,7 @@ func buildEmbedder(cfg *config.AppConfig) (store.Embedder, func() error, error) 
 		}
 		localEmb, err := embedder.NewLocalEmbedder(localCfg)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "[bootstrap] local embedder failed: %v (path=%s)\n", err, localCfg.ModelPath)
 			return nil, nil, nil
 		}
 		return localEmb, localEmb.Close, nil

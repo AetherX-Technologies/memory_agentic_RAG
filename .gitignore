@@ -5,6 +5,11 @@ dist/
 .DS_Store
 cmd/real_world_test/config.yaml
 
+# Local config with API keys — NEVER commit
+config.local.yaml
+.env
+.env.*
+
 # ONNX models (too large for git)
 models/
 *.onnx

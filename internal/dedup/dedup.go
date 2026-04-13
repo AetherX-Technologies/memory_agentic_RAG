@@ -74,6 +74,17 @@ func DefaultConfigFor(profile Profile) Config {
 		MaxConnections:  3,
 	}
 
+	// Check for calibrated profile (format: "calibrated:modelName")
+	if strings.HasPrefix(string(profile), "calibrated:") {
+		modelName := strings.TrimPrefix(string(profile), "calibrated:")
+		if cached := LoadCachedCalibration(modelName); cached != nil {
+			ApplyCalibration(&cfg, cached)
+			// Still need LLM config — fall through to the env reading below
+			goto readLLMEnv
+		}
+		// Cache miss — fall through to generic
+	}
+
 	// Apply profile-specific thresholds
 	switch profile {
 	case ProfileQwen3Local:
@@ -101,6 +112,7 @@ func DefaultConfigFor(profile Profile) Config {
 		cfg.ConnectionMaxSim = 0.85
 	}
 
+readLLMEnv:
 	// Pick up LLM config from environment (same vars as consolidation)
 	if key := os.Getenv("MEMORY_LLM_KEY"); key != "" {
 		cfg.LLMAPIKey = key
@@ -315,7 +327,12 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 // excludeIDs are skipped (e.g. the just-superseded memory).
 func (d *Deduplicator) buildConnectionsFiltered(newID string, candidates []store.SearchResult, effectiveConflictThresh float64, excludeIDs map[string]bool) {
 	minSim := d.config.ConnectionMinSim
-	maxSim := effectiveConflictThresh // use adaptive threshold, not static config
+	// Use the lower of ConnectionMaxSim and effectiveConflictThresh
+	// so connections never enter the conflict detection zone
+	maxSim := d.config.ConnectionMaxSim
+	if effectiveConflictThresh < maxSim {
+		maxSim = effectiveConflictThresh
+	}
 	maxConns := d.config.MaxConnections
 	if maxConns <= 0 {
 		maxConns = 3

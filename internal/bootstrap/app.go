@@ -8,6 +8,7 @@ import (
 
 	"github.com/yourusername/hybridmem-rag/internal/config"
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
+	"github.com/yourusername/hybridmem-rag/internal/dedup"
 	"github.com/yourusername/hybridmem-rag/internal/embedder"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 	"github.com/yourusername/hybridmem-rag/internal/trigger"
@@ -20,7 +21,8 @@ type App struct {
 	Consolidator *consolidate.Consolidator
 	DBPath       string
 
-	closeFuncs []func() error
+	calibration *dedup.CalibrationResult
+	closeFuncs  []func() error
 }
 
 func Load() (*App, error) {
@@ -74,14 +76,37 @@ func Load() (*App, error) {
 		app.closeFuncs = append(app.closeFuncs, closeEmbedder)
 	}
 
-	// Set dedup profile based on detected embedder provider.
-	// This must be set before mcp.New or api.NewHandlerWithDeps is called,
-	// because they read dedup.DefaultConfig() which picks up this env var.
+	// Auto-calibrate dedup thresholds for the embedder model.
+	// Uses cached calibration if available, otherwise runs a ~30-pair benchmark.
 	if emb != nil {
 		embedProvider := envOr("MEMORY_EMBED_PROVIDER", cfg.Embedding.Provider)
+		modelName := detectModelName(embedProvider, cfg)
 		profile := detectDedupProfile(embedProvider, cfg)
-		if profile != "" {
-			os.Setenv("MEMORY_EMBEDDER_PROFILE", profile)
+
+		// Check for cached calibration first
+		if cached := dedup.LoadCachedCalibration(modelName); cached != nil {
+			fmt.Fprintf(os.Stderr, "[bootstrap] using cached calibration for %s\n", modelName)
+			os.Setenv("MEMORY_EMBEDDER_PROFILE", "calibrated:"+modelName)
+			app.calibration = cached
+		} else if profile != "" {
+			// Known hardcoded profile (e.g. qwen3-local)
+			os.Setenv("MEMORY_EMBEDDER_PROFILE", string(profile))
+		} else {
+			// Unknown model — run auto-calibration
+			fmt.Fprintf(os.Stderr, "[bootstrap] unknown embedder %q — running auto-calibration...\n", modelName)
+			cal, err := dedup.Calibrate(emb, modelName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[bootstrap] calibration failed: %v (using generic defaults)\n", err)
+			} else {
+				dedup.PrintCalibration(cal)
+				if err := dedup.SaveCalibration(cal); err != nil {
+					fmt.Fprintf(os.Stderr, "[bootstrap] failed to save calibration: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "[bootstrap] calibration saved to ~/.hybridmem/calibration.json\n")
+				}
+				os.Setenv("MEMORY_EMBEDDER_PROFILE", "calibrated:"+modelName)
+				app.calibration = cal
+			}
 		}
 	}
 
@@ -208,16 +233,25 @@ func loadConfig() (*config.AppConfig, error) {
 	configPath := envOr("MEMORY_CONFIG_PATH", "")
 	if configPath != "" {
 		cfg, err := config.Load(configPath)
-		if err == nil {
-			return cfg, nil
+		if err != nil {
+			return nil, fmt.Errorf("MEMORY_CONFIG_PATH=%s: %w", configPath, err)
 		}
+		return cfg, nil
 	}
 
 	exeDir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
-	for _, candidate := range []string{filepath.Join(exeDir, "config.yaml"), "config.yaml"} {
+	// Prefer config.local.yaml (contains API keys, gitignored) over config.yaml
+	for _, candidate := range []string{
+		filepath.Join(exeDir, "config.local.yaml"), "config.local.yaml",
+		filepath.Join(exeDir, "config.yaml"), "config.yaml",
+	} {
 		if _, err := os.Stat(candidate); err == nil {
 			cfg, loadErr := config.Load(candidate)
-			if loadErr == nil {
+			if loadErr != nil {
+				fmt.Fprintf(os.Stderr, "[bootstrap] warning: %s exists but failed to load: %v\n", candidate, loadErr)
+				continue
+			}
+			if cfg != nil {
 				return cfg, nil
 			}
 		}
@@ -235,13 +269,41 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// detectModelName returns a unique identifier for the embedder model for calibration cache.
+func detectModelName(provider string, cfg *config.AppConfig) string {
+	switch provider {
+	case "local":
+		modelPath := cfg.Embedding.Local.ModelPath
+		if modelPath == "" { return "local:default" }
+		// Use parent dir name + file name for unique identity
+		// e.g. "models/qwen3-embedding-0.6b-onnx-uint8/dynamic_uint8.onnx" → "local:qwen3-embedding-0.6b-onnx-uint8/dynamic_uint8.onnx"
+		dir := filepath.Base(filepath.Dir(modelPath))
+		base := filepath.Base(modelPath)
+		return "local:" + dir + "/" + base
+	case "jina":
+		model := envOr("MEMORY_EMBED_MODEL", cfg.Embedding.Jina.Model)
+		if model == "" { model = "jina-embeddings-v3" }
+		return "jina:" + model
+	case "openai":
+		model := envOr("MEMORY_EMBED_MODEL", cfg.Embedding.OpenAI.Model)
+		if model == "" { model = "text-embedding-3-small" }
+		return "openai:" + model
+	default:
+		return provider + ":unknown"
+	}
+}
+
 // detectDedupProfile picks the right dedup threshold profile based on embedder provider + model.
 // Returns "" for unknown combinations, which means the generic profile is used.
 func detectDedupProfile(provider string, cfg *config.AppConfig) string {
 	switch provider {
 	case "local":
-		// Local ONNX — currently only Qwen3-0.6B is supported
-		return "qwen3-local"
+		// Only return hardcoded profile for the known default Qwen3 model
+		modelPath := cfg.Embedding.Local.ModelPath
+		if strings.Contains(modelPath, "qwen3") || modelPath == "" {
+			return "qwen3-local"
+		}
+		return "" // unknown local model → auto-calibrate
 	case "jina":
 		model := envOr("MEMORY_EMBED_MODEL", cfg.Embedding.Jina.Model)
 		if strings.Contains(model, "v3") || model == "" {

@@ -167,34 +167,104 @@ if estimateTokens(content) > MaxMemoryTokens (默认 500):
 
 ```yaml
 llm:
-  provider: "openai"
-  api_key: "clp_..."           # 主模型 key
-  model: "gpt-5.4"             # 主模型：consolidation、冲突检测、深度推理
+  api_key: "clp_..."            # 主模型 key（LLMConfig 无 provider 字段，OpenAI 兼容）
+  model: "gpt-5.4"              # 主模型：consolidation、冲突检测、深度推理
   endpoint: "https://api-vip.codex-for.me/v1/chat/completions"
+  timeout: 30
+  concurrency: 5
 
-  summary:                      # 可选：摘要/结构化提取等轻量任务
-    api_key: ""                # 空 = 继承主 key
+  summary:                       # 可选：摘要/结构化提取等轻量任务
+    api_key: ""                 # 空 = 继承主 key
     model: "gpt-4o-mini"
-    endpoint: ""               # 空 = 继承主 endpoint
+    endpoint: ""                # 空 = 继承主 endpoint
+    timeout: 0                  # 0 = 继承主 timeout
 ```
 
 **使用策略**：
 
-| 任务 | 用哪个模型 | 理由 |
-|------|-----------|------|
-| 方案 B: 长文本摘要生成 | summary（或 fallback 主） | 结构化任务，小模型足够 |
-| 方案 A-Phase2: condensation 摘要 | summary（或 fallback 主） | 同上 |
-| 当前 consolidation | 主 LLM | 需要跨记忆推理发现模式 |
-| 当前冲突检测 | 主 LLM | 需要语义理解（可选改为 summary） |
-| 未来 episode 提取 | summary | 简单分类任务 |
+| 任务 | 当前实现 | 用哪个模型 | 迁移复杂度 |
+|------|---------|-----------|-----------|
+| **现有**: L0/L1 摘要生成 (`generator`) | 用 `cfg.LLM` | summary | 中（需改 generator 路由） |
+| **现有**: 记忆提取 (`extractor`) | 用 `cfg.LLM` | summary | 中（需改 extractor 路由） |
+| **现有**: Consolidation (`consolidate`) | 用 `cfg.LLM` via `llmutil` | 主 LLM | 无需改（默认） |
+| **现有**: 冲突检测 (`dedup`) | **独立 HTTP 客户端**（不走 `llmutil`） | 可选 summary | **高**（需重构 dedup 的 HTTP 调用） |
+| 方案 B: 长文本摘要生成 | 未实现 | summary | 低（新代码直接用） |
+| 方案 A-Phase2: condensation 摘要 | 未实现 | summary | 低（新代码直接用） |
 
-**实现要点**：
-- `consolidate.Config` 新增 `SummaryLLMKey/Model/Endpoint` 字段（optional）
-- `llmutil` 新增 `CallSummaryLLM()`——自动 fallback 到主配置
-- bootstrap 从 `cfg.LLM.Summary` 读取
-- **向后兼容**：如果 `summary` 未配置，所有任务仍用主 LLM
+**现状关键点（Codex 审查发现）**：
+- `cfg.LLM` 已被多个现有消费者使用（`generator`、`extractor`、`consolidate`），不仅是 consolidation
+- 项目**没有统一的 LLM 路由层**：`consolidate` 走 `llmutil`，`dedup` 有自己的 HTTP 客户端
+- 不同调用点的 timeout 各异：llmutil 强制要求，bootstrap 给 consolidation 设 120s，dedup 默认 15s
 
-**工作量**：~50 行配置 + ~30 行 llmutil 路由 = 约 80 行基础设施（可独立于 B/A 先落地）
+**实现要点（修正版）**：
+
+1. **配置层**：`config.LLMConfig` 新增 `Summary *LLMSubConfig` 字段（optional），包含 api_key/model/endpoint/timeout
+2. **路由层**：在 `llmutil` 中新增 `ResolvedConfig` helper——接受 "main" / "summary" 标签，返回继承 fallback 后的完整 LLMConfig
+3. **调用点迁移**（逐步）：
+   - Phase D1（基础设施）：配置 + `llmutil` helper，现有代码不动 — **~100 行**
+   - Phase D2（迁移 generator/extractor）：两个现有消费者切换到 summary 路由 — **~60 行**
+   - Phase D3（可选：dedup 统一）：把 dedup 的独立 HTTP 客户端也接入 llmutil — **~150 行**
+4. **向后兼容**：`summary` 未配置时，`ResolvedConfig("summary")` 返回主配置
+
+**环境变量覆盖**（与现有 `MEMORY_LLM_*` 对称）：
+
+| 环境变量 | 作用 | 对应字段 |
+|---------|------|---------|
+| `MEMORY_LLM_KEY` | 主模型 API key（已存在） | `llm.api_key` |
+| `MEMORY_LLM_MODEL` | 主模型名（已存在） | `llm.model` |
+| `MEMORY_LLM_ENDPOINT` | 主 endpoint（已存在） | `llm.endpoint` |
+| **`MEMORY_LLM_TIMEOUT`** | 主超时（新增） | `llm.timeout` |
+| **`MEMORY_LLM_SUMMARY_KEY`** | 小模型 API key（新增） | `llm.summary.api_key` |
+| **`MEMORY_LLM_SUMMARY_MODEL`** | 小模型名（新增） | `llm.summary.model` |
+| **`MEMORY_LLM_SUMMARY_ENDPOINT`** | 小模型 endpoint（新增） | `llm.summary.endpoint` |
+| **`MEMORY_LLM_SUMMARY_TIMEOUT`** | 小模型超时（新增，秒） | `llm.summary.timeout` |
+
+**Fallback 顺序**（每个字段独立）：`MEMORY_LLM_SUMMARY_X` > `llm.summary.X` > `MEMORY_LLM_X` > `llm.X`
+
+> 注：当前代码无 `MEMORY_LLM_TIMEOUT`，本方案顺带补上（否则 timeout 的 env 覆盖不完整）。
+
+### 3.7 Dedup 集成细节（关键）
+
+`dedup.DefaultConfig()` 当前是**无参数**构造，直接读 env var（`MEMORY_LLM_*`），被 `api/handler.go` 和 `mcp/server.go` 调用时**无法接收 YAML 配置**。
+
+**解决方案**：新增 `dedup.DefaultConfigFromLLM(cfg config.LLMConfig) Config`，由 bootstrap 调用并传入已解析的 LLM 配置：
+
+```go
+// internal/bootstrap/app.go
+mainLLM := llmutil.ResolveLLMConfig(cfg.LLM, nil, "main")       // main tier
+summaryLLM := llmutil.ResolveLLMConfig(cfg.LLM, cfg.LLM.Summary, "summary") // 可选
+
+// 当前：dedup.DefaultConfig() 绕过 cfg
+// 方案：dedup.DefaultConfigFromLLM(mainLLM)  // 冲突检测用主模型
+```
+
+然后 `mcp.New` 和 `api.NewHandlerWithDeps` 需新增 `App` 或 `LLMConfig` 参数（或用 `SetDedup` 模式）。
+
+同时 `consolidate.New()` 也必须从 `ResolveLLMConfig` 取 timeout，而不是像现在 `bootstrap/app.go` 硬编码 `LLMTimeout: 120`（否则 `MEMORY_LLM_TIMEOUT` 对 consolidation 不生效，违反单一 fallback 原则）。
+
+**D1 必须修改的所有调用点**（否则 summary tier 形同虚设）：
+
+| 文件:行 | 当前 | 改为 |
+|---------|------|------|
+| `internal/api/handler.go:31` | `dedup.New(st, emb, dedup.DefaultConfig())` | 接收 `llmConfig` 参数，用 `DefaultConfigFromLLM(mainLLM)` |
+| `internal/mcp/server.go:54` | `dedup.New(st, emb, dedup.DefaultConfig())` | 同上 |
+| `internal/bootstrap/app.go:146` | `consolidate.New(st, Config{..., LLMTimeout: 120})` | 用 `ResolveLLMConfig` 输出的 timeout |
+| 旧 API：`dedup.DefaultConfig()` | 仍保留（向后兼容），但加 deprecation 注释 | 指向新 API |
+
+**影响**：
+- D1 基础设施 + dedup 构造器：~30 行
+- 所有调用点迁移：~20 行
+- bootstrap consolidate.New 改用 resolved timeout：~5 行
+- llmutil `ResolveLLMConfig` helper：~30 行
+- config struct 扩展（Summary 子字段）：~15 行
+- env var 读取（含 fallback 链）：~30 行
+- **总计修正**：D1 变为 ~130 行
+
+**工作量修正**：
+- **D1 基础设施 + dedup 构造器重构**：~130 行
+- **D2 现有消费者迁移**（generator/extractor）：~60 行
+- **D3 dedup HTTP 客户端统一（可选）**：~150 行
+- **总计**：D1+D2 约 190 行可用；D3 视需求决定
 
 **需要改动的路径**：
 - `dedup.StoreWithDedup()` — 主路径，embedding 使用 Abstract
@@ -276,7 +346,7 @@ func (c *Consolidator) consolidateWithEscalation(ctx context.Context, text strin
 |------|-------------|-------------|--------------------|-----------------------|---------------------|
 | **用户价值** | 中（降成本） | 中（防止性能退化） | 高（洞察质量提升） | 高（渐进压缩） | 低（LLM 故障时） |
 | **技术风险** | 极低 | 低 | 低 | 中（schema 迁移） | 极低 |
-| **工作量** | ~80 行 | ~200 行 | ~150 行 | ~600 行额外 | ~50 行 |
+| **工作量** | D1+D2 ~190 行 | ~200 行 | ~150 行 | ~600 行额外 | ~50 行 |
 | **前置依赖** | 无 | D（推荐）| connections ✅ | A-Phase1 | 无 |
 | **可独立交付** | 是 | 是 | 是 | 是 | 是 |
 | **推荐顺序** | **第 1** | **第 2** | **第 3** | 第 4 | 第 5 |

@@ -202,7 +202,7 @@ func Load() (*App, error) {
 	}
 
 	// Lightweight LLM components use SummaryLLM tier (smaller/cheaper model).
-	// If summary not configured, falls back to mainLLM via ResolveLLMConfig.
+	// Generator requires an API key (no fallback mode).
 	if summaryLLM.APIKey != "" {
 		genCfg := generator.DefaultConfig()
 		genCfg.APIKey = summaryLLM.APIKey
@@ -216,16 +216,20 @@ func Load() (*App, error) {
 		} else {
 			fmt.Fprintf(os.Stderr, "[bootstrap] generator init failed: %v\n", err)
 		}
+	}
 
-		extCfg := extractor.DefaultConfig()
+	// Extractor always constructed — it has a built-in rule-based fallback
+	// when no API key is available, so callers can rely on app.Extractor != nil.
+	extCfg := extractor.DefaultConfig()
+	if summaryLLM.APIKey != "" {
 		extCfg.APIKey = summaryLLM.APIKey
 		extCfg.Model = summaryLLM.Model
 		extCfg.Endpoint = summaryLLM.Endpoint
 		if summaryLLM.Timeout > 0 {
 			extCfg.Timeout = summaryLLM.Timeout
 		}
-		app.Extractor = extractor.New(extCfg)
 	}
+	app.Extractor = extractor.New(extCfg)
 
 	return app, nil
 }

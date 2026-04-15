@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/yourusername/hybridmem-rag/internal/config"
@@ -172,12 +173,17 @@ func Load() (*App, error) {
 	app.SummaryLLM = summaryLLM
 
 	if mainLLM.APIKey != "" {
-		// Consolidation needs longer timeout than typical calls because the prompt
-		// processes up to 50 memories. Use the larger of resolved timeout or the
-		// 120s floor to avoid breaking workloads that don't override LLM_TIMEOUT.
-		consolidationTimeout := mainLLM.Timeout
-		if consolidationTimeout < 120 {
-			consolidationTimeout = 120
+		// Consolidation typically needs longer timeout than other LLM calls (processes 50 memories).
+		// Resolution order:
+		//   1. MEMORY_CONSOLIDATION_TIMEOUT env var (explicit user override, exact value used)
+		//   2. max(resolved main LLM timeout, 120s) (safe floor — protects against
+		//      yaml llm.timeout being too small for consolidation workload)
+		consolidationTimeout := envIntOr("MEMORY_CONSOLIDATION_TIMEOUT", 0)
+		if consolidationTimeout <= 0 {
+			consolidationTimeout = mainLLM.Timeout
+			if consolidationTimeout < 120 {
+				consolidationTimeout = 120
+			}
 		}
 		app.Consolidator = consolidate.New(st, consolidate.Config{
 			LLMAPIKey:   mainLLM.APIKey,
@@ -305,6 +311,15 @@ func loadConfig() (*config.AppConfig, error) {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envIntOr(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			return i
+		}
 	}
 	return fallback
 }

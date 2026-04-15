@@ -57,9 +57,34 @@ const (
 // DefaultConfig returns sensible defaults for the profile indicated by
 // MEMORY_EMBEDDER_PROFILE env var (set by bootstrap). Falls back to generic.
 // LLM settings are read from environment variables if available.
+//
+// Deprecated: prefer DefaultConfigFromLLM which accepts the resolved LLM config
+// from bootstrap (so YAML config and summary tier are properly applied).
 func DefaultConfig() Config {
 	profile := Profile(os.Getenv("MEMORY_EMBEDDER_PROFILE"))
 	return DefaultConfigFor(profile)
+}
+
+// DefaultConfigFromLLM returns a dedup Config with LLM fields populated from
+// a pre-resolved LLM configuration (typically the main tier from bootstrap).
+// This is the preferred constructor — it ensures YAML config + Summary tier
+// + env vars are all properly resolved before reaching dedup.
+func DefaultConfigFromLLM(llmKey, llmModel, llmEndpoint string, llmTimeout int) Config {
+	profile := Profile(os.Getenv("MEMORY_EMBEDDER_PROFILE"))
+	cfg := DefaultConfigFor(profile)
+	if llmKey != "" {
+		cfg.LLMAPIKey = llmKey
+	}
+	if llmModel != "" {
+		cfg.LLMModel = llmModel
+	}
+	if llmEndpoint != "" {
+		cfg.LLMEndpoint = llmEndpoint
+	}
+	if llmTimeout > 0 {
+		cfg.LLMTimeout = llmTimeout
+	}
+	return cfg
 }
 
 // DefaultConfigFor returns threshold defaults calibrated for the given embedder profile.

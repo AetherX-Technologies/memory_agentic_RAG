@@ -20,29 +20,29 @@ type AppConfig struct {
 	Store     StoreConfig     `yaml:"store"`
 	Embedding EmbeddingConfig `yaml:"embedding"`
 	Rerank    RerankConfig    `yaml:"rerank"`
-	LLM       LLMConfig      `yaml:"llm"`
+	LLM       LLMConfig       `yaml:"llm"`
 	Splitter  SplitterConfig  `yaml:"splitter"`
 	Retrieval RetrievalConfig `yaml:"retrieval"`
 }
 
 // StoreConfig controls the database.
 type StoreConfig struct {
-	DBPath    string `yaml:"db_path"`     // default: "data/memories.db"
-	VectorDim int    `yaml:"vector_dim"`  // 0 = auto-detect
+	DBPath    string `yaml:"db_path"`    // default: "data/memories.db"
+	VectorDim int    `yaml:"vector_dim"` // 0 = auto-detect
 }
 
 // EmbeddingConfig controls the embedding model (local or API).
 type EmbeddingConfig struct {
-	Provider string            `yaml:"provider"` // "local" | "jina" | "openai"
-	Local    LocalModelConfig  `yaml:"local"`
-	Jina     APIModelConfig    `yaml:"jina"`
-	OpenAI   APIModelConfig    `yaml:"openai"`
+	Provider string           `yaml:"provider"` // "local" | "jina" | "openai"
+	Local    LocalModelConfig `yaml:"local"`
+	Jina     APIModelConfig   `yaml:"jina"`
+	OpenAI   APIModelConfig   `yaml:"openai"`
 }
 
 // RerankConfig controls the reranker (API-based or disabled).
 type RerankConfig struct {
 	Enabled           bool    `yaml:"enabled"`
-	Provider          string  `yaml:"provider"`           // "jina" | "none"
+	Provider          string  `yaml:"provider"` // "jina" | "none"
 	APIKey            string  `yaml:"api_key"`
 	Model             string  `yaml:"model"`              // default: "jina-reranker-v2-base-multilingual"
 	Endpoint          string  `yaml:"endpoint"`           // default: "https://api.jina.ai/v1/rerank"
@@ -57,19 +57,29 @@ type RerankConfig struct {
 // LLMConfig controls the LLM for L0/L1 generation and memory extraction.
 // Only OpenAI-compatible endpoints are supported (set endpoint for custom providers).
 type LLMConfig struct {
-	APIKey      string `yaml:"api_key"`
-	Model       string `yaml:"model"`       // default: "gpt-4o-mini"
-	Endpoint    string `yaml:"endpoint"`    // OpenAI-compatible endpoint, default: "https://api.openai.com/v1/chat/completions"
-	Timeout     int    `yaml:"timeout"`     // seconds, default: 30
-	Concurrency int    `yaml:"concurrency"` // default: 5
+	APIKey      string         `yaml:"api_key"`
+	Model       string         `yaml:"model"`       // default: "gpt-4o-mini"
+	Endpoint    string         `yaml:"endpoint"`    // OpenAI-compatible endpoint, default: "https://api.openai.com/v1/chat/completions"
+	Timeout     int            `yaml:"timeout"`     // seconds, default: 30
+	Concurrency int            `yaml:"concurrency"` // default: 5
+	Summary     *LLMSubConfig  `yaml:"summary,omitempty"` // optional smaller model for lightweight tasks
+}
+
+// LLMSubConfig is a tier-specific LLM override (e.g. summary tier).
+// Empty fields inherit from the parent LLMConfig.
+type LLMSubConfig struct {
+	APIKey   string `yaml:"api_key"`  // empty = inherit
+	Model    string `yaml:"model"`    // empty = inherit
+	Endpoint string `yaml:"endpoint"` // empty = inherit
+	Timeout  int    `yaml:"timeout"`  // 0 = inherit
 }
 
 // SplitterConfig controls document splitting behavior.
 type SplitterConfig struct {
-	MaxChunkSize   int  `yaml:"max_chunk_size"`   // default: 512
-	MinChunkSize   int  `yaml:"min_chunk_size"`   // default: 256
-	EnableSemantic bool `yaml:"enable_semantic"`   // if true, uses embedding.local model
-	MinSegment     int  `yaml:"min_segment"`       // default: 3
+	MaxChunkSize   int  `yaml:"max_chunk_size"`  // default: 512
+	MinChunkSize   int  `yaml:"min_chunk_size"`  // default: 256
+	EnableSemantic bool `yaml:"enable_semantic"` // if true, uses embedding.local model
+	MinSegment     int  `yaml:"min_segment"`     // default: 3
 }
 
 // RetrievalConfig controls the retrieval strategy.
@@ -82,7 +92,7 @@ type RetrievalConfig struct {
 // LocalModelConfig for ONNX-based local models.
 type LocalModelConfig struct {
 	ModelPath string `yaml:"model_path"`
-	BatchSize int    `yaml:"batch_size"` // default: 16
+	BatchSize int    `yaml:"batch_size"`  // default: 16
 	MaxSeqLen int    `yaml:"max_seq_len"` // default: 512
 }
 
@@ -108,6 +118,18 @@ func Load(path string) (*AppConfig, error) {
 
 	applyDefaults(cfg)
 	return cfg, nil
+}
+
+// Default returns a config object populated with defaults.
+func Default() *AppConfig {
+	cfg := &AppConfig{}
+	applyDefaults(cfg)
+	return cfg
+}
+
+// ApplyDefaults fills in missing values with sensible defaults.
+func ApplyDefaults(cfg *AppConfig) {
+	applyDefaults(cfg)
 }
 
 // applyDefaults fills in missing values with sensible defaults.
@@ -206,7 +228,9 @@ func (c *AppConfig) ToEmbeddingConfig() store.EmbeddingConfig {
 	switch c.Embedding.Provider {
 	case "jina":
 		timeout := c.Embedding.Jina.Timeout
-		if timeout <= 0 { timeout = 30 }
+		if timeout <= 0 {
+			timeout = 30
+		}
 		return store.EmbeddingConfig{
 			Enabled:  true,
 			Provider: "jina",
@@ -217,7 +241,9 @@ func (c *AppConfig) ToEmbeddingConfig() store.EmbeddingConfig {
 		}
 	case "openai":
 		timeout := c.Embedding.OpenAI.Timeout
-		if timeout <= 0 { timeout = 30 }
+		if timeout <= 0 {
+			timeout = 30
+		}
 		return store.EmbeddingConfig{
 			Enabled:  true,
 			Provider: "openai",

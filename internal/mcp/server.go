@@ -17,6 +17,7 @@ import (
 
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
 	"github.com/yourusername/hybridmem-rag/internal/dedup"
+	"github.com/yourusername/hybridmem-rag/internal/llmutil"
 	"github.com/yourusername/hybridmem-rag/internal/memservice"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 )
@@ -51,6 +52,9 @@ func DefaultConfig() Config {
 }
 
 // New creates a new MCP server. Consolidator is optional (nil if LLM not configured).
+//
+// Deprecated: prefer NewWithLLM which receives a resolved LLM config so dedup
+// can use the proper YAML/env-resolved settings instead of env-only DefaultConfig.
 func New(s store.Store, embedder store.Embedder, cfg Config, cons ...*consolidate.Consolidator) *Server {
 	srv := &Server{
 		store:    s,
@@ -62,9 +66,29 @@ func New(s store.Store, embedder store.Embedder, cfg Config, cons ...*consolidat
 		srv.consolidator = cons[0]
 	}
 	srv.service = memservice.New(s, embedder, srv.consolidator)
-	// Wire dedup into service if embedder is available
 	if embedder != nil {
 		d := dedup.New(s, embedder, dedup.DefaultConfig())
+		srv.service.SetDedup(d)
+	}
+	srv.registerTools()
+	return srv
+}
+
+// NewWithLLM creates a new MCP server with explicit LLM configurations.
+// mainLLM is used for dedup conflict detection (deep reasoning).
+// Pass empty ResolvedLLMConfig if LLM is unavailable — dedup will use env fallback.
+func NewWithLLM(s store.Store, embedder store.Embedder, cfg Config, mainLLM llmutil.ResolvedLLMConfig, cons *consolidate.Consolidator) *Server {
+	srv := &Server{
+		store:        s,
+		embedder:     embedder,
+		consolidator: cons,
+		handlers:     make(map[string]ToolHandler),
+		config:       cfg,
+	}
+	srv.service = memservice.New(s, embedder, srv.consolidator)
+	if embedder != nil {
+		dedupCfg := dedup.DefaultConfigFromLLM(mainLLM.APIKey, mainLLM.Model, mainLLM.Endpoint, mainLLM.Timeout)
+		d := dedup.New(s, embedder, dedupCfg)
 		srv.service.SetDedup(d)
 	}
 	srv.registerTools()

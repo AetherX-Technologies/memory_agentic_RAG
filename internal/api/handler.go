@@ -10,6 +10,7 @@ import (
 
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
 	"github.com/yourusername/hybridmem-rag/internal/dedup"
+	"github.com/yourusername/hybridmem-rag/internal/llmutil"
 	"github.com/yourusername/hybridmem-rag/internal/memservice"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 )
@@ -24,11 +25,29 @@ func NewHandler(store store.Store) *Handler {
 	return NewHandlerWithDeps(store, nil, nil)
 }
 
+// NewHandlerWithDeps creates an HTTP handler with optional dependencies.
+//
+// Deprecated: prefer NewHandlerWithLLM for proper YAML/env LLM resolution.
 func NewHandlerWithDeps(st store.Store, embedder store.Embedder, consolidator *consolidate.Consolidator) *Handler {
 	svc := memservice.New(st, embedder, consolidator)
-	// Wire dedup into service if embedder is available
 	if embedder != nil {
 		d := dedup.New(st, embedder, dedup.DefaultConfig())
+		svc.SetDedup(d)
+	}
+	return &Handler{
+		store:          st,
+		service:        svc,
+		singleToolMode: os.Getenv("MEMORY_SINGLE_TOOL") == "1",
+	}
+}
+
+// NewHandlerWithLLM creates an HTTP handler with explicit resolved LLM config.
+// Use this from bootstrap to ensure dedup gets the proper YAML/env-resolved settings.
+func NewHandlerWithLLM(st store.Store, embedder store.Embedder, consolidator *consolidate.Consolidator, mainLLM llmutil.ResolvedLLMConfig) *Handler {
+	svc := memservice.New(st, embedder, consolidator)
+	if embedder != nil {
+		dedupCfg := dedup.DefaultConfigFromLLM(mainLLM.APIKey, mainLLM.Model, mainLLM.Endpoint, mainLLM.Timeout)
+		d := dedup.New(st, embedder, dedupCfg)
 		svc.SetDedup(d)
 	}
 	return &Handler{

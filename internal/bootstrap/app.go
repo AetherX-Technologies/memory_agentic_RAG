@@ -10,6 +10,7 @@ import (
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
 	"github.com/yourusername/hybridmem-rag/internal/dedup"
 	"github.com/yourusername/hybridmem-rag/internal/embedder"
+	"github.com/yourusername/hybridmem-rag/internal/llmutil"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 	"github.com/yourusername/hybridmem-rag/internal/trigger"
 )
@@ -20,6 +21,12 @@ type App struct {
 	Embedder     store.Embedder
 	Consolidator *consolidate.Consolidator
 	DBPath       string
+
+	// Resolved LLM configurations (env > yaml fallback applied).
+	// MainLLM is for consolidation, conflict detection, deep reasoning.
+	// SummaryLLM is for summarization, structured extraction (falls back to MainLLM if not configured).
+	MainLLM    llmutil.ResolvedLLMConfig
+	SummaryLLM llmutil.ResolvedLLMConfig
 
 	calibration *dedup.CalibrationResult
 	closeFuncs  []func() error
@@ -143,15 +150,40 @@ func Load() (*App, error) {
 		return nil
 	})
 
-	llmKey := envOr("MEMORY_LLM_KEY", cfg.LLM.APIKey)
-	if llmKey != "" {
-		llmEndpoint := envOr("MEMORY_LLM_ENDPOINT", cfg.LLM.Endpoint)
-		llmModel := envOr("MEMORY_LLM_MODEL", cfg.LLM.Model)
+	// Resolve main + summary LLM tiers (env > yaml fallback chain)
+	mainLLMInput := llmutil.MainLLMConfig{
+		APIKey:   cfg.LLM.APIKey,
+		Model:    cfg.LLM.Model,
+		Endpoint: cfg.LLM.Endpoint,
+		Timeout:  cfg.LLM.Timeout,
+	}
+	var summaryInput *llmutil.SummarySubConfig
+	if cfg.LLM.Summary != nil {
+		summaryInput = &llmutil.SummarySubConfig{
+			APIKey:   cfg.LLM.Summary.APIKey,
+			Model:    cfg.LLM.Summary.Model,
+			Endpoint: cfg.LLM.Summary.Endpoint,
+			Timeout:  cfg.LLM.Summary.Timeout,
+		}
+	}
+	mainLLM := llmutil.ResolveLLMConfig(mainLLMInput, summaryInput, llmutil.TierMain)
+	summaryLLM := llmutil.ResolveLLMConfig(mainLLMInput, summaryInput, llmutil.TierSummary)
+	app.MainLLM = mainLLM
+	app.SummaryLLM = summaryLLM
+
+	if mainLLM.APIKey != "" {
+		// Consolidation needs longer timeout than typical calls because the prompt
+		// processes up to 50 memories. Use the larger of resolved timeout or the
+		// 120s floor to avoid breaking workloads that don't override LLM_TIMEOUT.
+		consolidationTimeout := mainLLM.Timeout
+		if consolidationTimeout < 120 {
+			consolidationTimeout = 120
+		}
 		app.Consolidator = consolidate.New(st, consolidate.Config{
-			LLMAPIKey:   llmKey,
-			LLMModel:    llmModel,
-			LLMEndpoint: llmEndpoint,
-			LLMTimeout:  120,
+			LLMAPIKey:   mainLLM.APIKey,
+			LLMModel:    mainLLM.Model,
+			LLMEndpoint: mainLLM.Endpoint,
+			LLMTimeout:  consolidationTimeout,
 			MaxMemories: 50,
 		})
 	}

@@ -500,7 +500,12 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 		usedTokens := headerTokens
 		var connLines []string
 		for _, cm := range connMemories {
-			line := "- " + strings.ReplaceAll(cm.Text, "\n", " ") + "\n"
+			// Scheme B: prefer Abstract for connected memory display
+			cmText := cm.Text
+			if cm.Abstract != "" {
+				cmText = cm.Abstract
+			}
+			line := "- " + strings.ReplaceAll(cmText, "\n", " ") + "\n"
 			lineTokens := tokutil.EstimateTokens(line)
 			if usedTokens+lineTokens > connBudget {
 				continue

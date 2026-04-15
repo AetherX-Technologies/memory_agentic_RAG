@@ -124,7 +124,11 @@ func formatContext(results []store.SearchResult, maxTokens int) string {
 
 // formatMemoryLine formats a single memory for display.
 func formatMemoryLine(r store.SearchResult, memType string) string {
+	// Scheme B: prefer Abstract for display when present
 	text := r.Entry.Text
+	if r.Entry.Abstract != "" {
+		text = r.Entry.Abstract
+	}
 	if memType == "episode" && r.Entry.Timestamp > 0 {
 		date := time.Unix(r.Entry.Timestamp, 0).Format("2006-01-02")
 		return fmt.Sprintf("- [%s] %s\n", date, text)

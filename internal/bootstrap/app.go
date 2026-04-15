@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -232,6 +233,18 @@ func Load() (*App, error) {
 	app.Extractor = extractor.New(extCfg)
 
 	return app, nil
+}
+
+// Abstractor returns a function that generates Abstract for long content using
+// the configured Generator (which uses summary LLM tier).
+// Returns nil if no Generator is available — callers should treat as "no abstraction".
+func (a *App) Abstractor() func(ctx context.Context, content string) (string, error) {
+	if a.Generator == nil {
+		return nil
+	}
+	return func(ctx context.Context, content string) (string, error) {
+		return a.Generator.GenerateL0(ctx, content)
+	}
 }
 
 func (a *App) Close() error {

@@ -44,10 +44,19 @@ func NewHandlerWithDeps(st store.Store, embedder store.Embedder, consolidator *c
 // NewHandlerWithLLM creates an HTTP handler with explicit resolved LLM config.
 // Use this from bootstrap to ensure dedup gets the proper YAML/env-resolved settings.
 func NewHandlerWithLLM(st store.Store, embedder store.Embedder, consolidator *consolidate.Consolidator, mainLLM llmutil.ResolvedLLMConfig) *Handler {
+	return NewHandlerWithLLMAndAbstractor(st, embedder, consolidator, mainLLM, nil)
+}
+
+// NewHandlerWithLLMAndAbstractor adds a Scheme B abstractor for long-text protection.
+// Pass nil abstractor to disable long-text auto-summarization.
+func NewHandlerWithLLMAndAbstractor(st store.Store, embedder store.Embedder, consolidator *consolidate.Consolidator, mainLLM llmutil.ResolvedLLMConfig, abstractor dedup.Abstractor) *Handler {
 	svc := memservice.New(st, embedder, consolidator)
 	if embedder != nil {
 		dedupCfg := dedup.DefaultConfigFromLLM(mainLLM.APIKey, mainLLM.Model, mainLLM.Endpoint, mainLLM.Timeout)
 		d := dedup.New(st, embedder, dedupCfg)
+		if abstractor != nil {
+			d.SetAbstractor(abstractor)
+		}
 		svc.SetDedup(d)
 	}
 	return &Handler{

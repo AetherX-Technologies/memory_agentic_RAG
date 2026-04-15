@@ -433,6 +433,61 @@ func main() {
 	}
 
 	// ══════════════════════════════════════════════════════════
+	section("13. 方案 B — 长文本自动摘要 + Abstract 嵌入")
+	// ══════════════════════════════════════════════════════════
+
+	if app.Generator == nil {
+		fmt.Println("   ⚠️  Generator unavailable — skipping B test")
+	} else {
+		// Construct a long memory (>500 tokens estimated)
+		longContent := strings.Repeat("用户在过去三年深度参与了数十个微服务项目的架构设计与优化工作，", 30) +
+			"核心结论：用户是资深的Go后端架构师，擅长分布式系统设计。"
+
+		longTokens := tokutil.EstimateTokens(longContent)
+		fmt.Printf("   原始内容 token 估算: %d (>500 触发摘要)\n", longTokens)
+
+		// Wire abstractor into a fresh dedup for this test
+		dd2 := dedup.New(app.Store, app.Embedder, dedup.DefaultConfigFromLLM(
+			app.MainLLM.APIKey, app.MainLLM.Model, app.MainLLM.Endpoint, app.MainLLM.Timeout))
+		dd2.SetAbstractor(app.Abstractor())
+
+		h := sha256.Sum256([]byte(longContent))
+		result, err := dd2.StoreWithDedup(context.Background(), extractor.ExtractedMemory{
+			Content:     longContent,
+			MemoryType:  "fact",
+			Importance:  0.8,
+			Confidence:  0.9,
+			ContentHash: hex.EncodeToString(h[:8]),
+			SourceConv:  "conv-long",
+		})
+		assertNil(err, "Long content store")
+
+		if result.ID != "" {
+			storedMem, _ := app.Store.Get(result.ID)
+			if storedMem != nil {
+				if storedMem.Abstract != "" {
+					pass(fmt.Sprintf("长文本自动生成 Abstract: %s", truncate(storedMem.Abstract, 60)))
+					absTokens := tokutil.EstimateTokens(storedMem.Abstract)
+					if absTokens < longTokens/3 {
+						pass(fmt.Sprintf("Abstract 显著缩短: %d → %d tokens", longTokens, absTokens))
+					} else {
+						fmt.Printf("   ℹ️  Abstract 未显著缩短（%d → %d）\n", longTokens, absTokens)
+					}
+				} else {
+					fail("长文本未生成 Abstract")
+				}
+
+				// Verify Text is preserved (FTS still works on full content)
+				if len(storedMem.Text) >= len(longContent) {
+					pass("原文 Text 字段被完整保留")
+				} else {
+					fail("Text 字段被损坏: %d < %d", len(storedMem.Text), len(longContent))
+				}
+			}
+		}
+	}
+
+	// ══════════════════════════════════════════════════════════
 	fmt.Println()
 	fmt.Println("════════════════════════════════════════════════════════════")
 	fmt.Printf("  结果: %d passed, %d failed\n", passed, failed)

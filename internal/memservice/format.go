@@ -133,7 +133,12 @@ func formatContext(results []store.SearchResult, maxTokens int) string {
 }
 
 func formatMemoryLine(result store.SearchResult, memType string) string {
-	text := strings.ReplaceAll(result.Entry.Text, "\n", " ")
+	// Scheme B: prefer Abstract for display when present (long-text protection)
+	displayText := result.Entry.Text
+	if result.Entry.Abstract != "" {
+		displayText = result.Entry.Abstract
+	}
+	text := strings.ReplaceAll(displayText, "\n", " ")
 	suffix := ""
 	if result.Entry.SourceConv != "" {
 		suffix = fmt.Sprintf(" [conv:%s]", result.Entry.SourceConv)

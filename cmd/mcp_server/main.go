@@ -35,7 +35,7 @@ func main() {
 	}
 	defer app.Close()
 
-	srv := mcp.NewWithLLM(app.Store, app.Embedder, mcp.DefaultConfig(), app.MainLLM, app.Consolidator)
+	srv := mcp.NewWithLLMAndAbstractor(app.Store, app.Embedder, mcp.DefaultConfig(), app.MainLLM, app.Consolidator, app.Abstractor())
 	fmt.Fprintf(os.Stderr, "[memory] server ready (db=%s)\n", app.DBPath)
 
 	if err := srv.Run(context.Background()); err != nil {

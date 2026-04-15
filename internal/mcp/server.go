@@ -78,6 +78,12 @@ func New(s store.Store, embedder store.Embedder, cfg Config, cons ...*consolidat
 // mainLLM is used for dedup conflict detection (deep reasoning).
 // Pass empty ResolvedLLMConfig if LLM is unavailable — dedup will use env fallback.
 func NewWithLLM(s store.Store, embedder store.Embedder, cfg Config, mainLLM llmutil.ResolvedLLMConfig, cons *consolidate.Consolidator) *Server {
+	return NewWithLLMAndAbstractor(s, embedder, cfg, mainLLM, cons, nil)
+}
+
+// NewWithLLMAndAbstractor adds a Scheme B abstractor for long-text protection.
+// Pass nil abstractor to disable long-text auto-summarization (default behavior).
+func NewWithLLMAndAbstractor(s store.Store, embedder store.Embedder, cfg Config, mainLLM llmutil.ResolvedLLMConfig, cons *consolidate.Consolidator, abstractor dedup.Abstractor) *Server {
 	srv := &Server{
 		store:        s,
 		embedder:     embedder,
@@ -89,6 +95,9 @@ func NewWithLLM(s store.Store, embedder store.Embedder, cfg Config, mainLLM llmu
 	if embedder != nil {
 		dedupCfg := dedup.DefaultConfigFromLLM(mainLLM.APIKey, mainLLM.Model, mainLLM.Endpoint, mainLLM.Timeout)
 		d := dedup.New(s, embedder, dedupCfg)
+		if abstractor != nil {
+			d.SetAbstractor(abstractor)
+		}
 		srv.service.SetDedup(d)
 	}
 	srv.registerTools()

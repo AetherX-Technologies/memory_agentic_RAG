@@ -40,7 +40,16 @@ type Config struct {
 	ConnectionMinSim float64 // minimum similarity for connection (default: 0.7)
 	ConnectionMaxSim float64 // maximum similarity for connection (below ConflictThreshold, default: 0.85)
 	MaxConnections   int     // max connections per store operation (default: 3)
+
+	// Long-text protection (Scheme B)
+	// When content exceeds MaxMemoryTokens, dedup generates an Abstract via Abstractor
+	// and uses it for embedding/dedup, while preserving Text for FTS.
+	MaxMemoryTokens int // 0 = disabled; recommended 500
 }
+
+// Abstractor generates a short summary of long content.
+// Returns the original content if generation fails (caller may handle differently).
+type Abstractor func(ctx context.Context, content string) (string, error)
 
 // Profile identifies embedder-specific threshold tuning.
 // Different embedding models have very different cosine similarity distributions,
@@ -84,6 +93,9 @@ func DefaultConfigFromLLM(llmKey, llmModel, llmEndpoint string, llmTimeout int) 
 	if llmTimeout > 0 {
 		cfg.LLMTimeout = llmTimeout
 	}
+	// Default long-text protection (Scheme B): generate Abstract for content > 500 tokens.
+	// Bootstrap should call SetAbstractor() to enable; if not set, long content stores as-is.
+	cfg.MaxMemoryTokens = 500
 	return cfg
 }
 
@@ -161,11 +173,21 @@ type Result struct {
 
 // Deduplicator handles memory dedup, conflict detection, and storage.
 type Deduplicator struct {
-	store    store.Store
-	embedder store.Embedder
-	config   Config
-	client   *http.Client
-	mu       sync.Mutex // serializes check-then-insert
+	store      store.Store
+	embedder   store.Embedder
+	config     Config
+	client     *http.Client
+	abstractor Abstractor // optional, set via SetAbstractor for long-text protection
+	mu         sync.Mutex // serializes check-then-insert
+}
+
+// SetAbstractor injects a function that generates abstracts for long content.
+// Called from bootstrap when summary LLM is configured.
+// Safe to call before any StoreWithDedup invocations.
+func (d *Deduplicator) SetAbstractor(a Abstractor) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.abstractor = a
 }
 
 // New creates a new Deduplicator. Embedder must not be nil.
@@ -209,8 +231,25 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Step 1: Embed the new memory
-	vec, err := d.embedder.Embed(mem.Content)
+	// Step 0: Long-text protection (Scheme B)
+	// If content exceeds MaxMemoryTokens and an Abstractor is available, generate
+	// an Abstract and use it for embedding/dedup. Text is preserved for FTS.
+	if d.config.MaxMemoryTokens > 0 && mem.Abstract == "" {
+		if estimateTokens(mem.Content) > d.config.MaxMemoryTokens && d.abstractor != nil {
+			if abs, err := d.abstractor(ctx, mem.Content); err == nil && abs != "" {
+				mem.Abstract = abs
+			} else if err != nil {
+				fmt.Fprintf(os.Stderr, "[dedup] abstract generation failed (using full text): %v\n", err)
+			}
+		}
+	}
+
+	// Step 1: Embed (use Abstract if available, else Content)
+	embedTarget := mem.Content
+	if mem.Abstract != "" {
+		embedTarget = mem.Abstract
+	}
+	vec, err := d.embedder.Embed(embedTarget)
 	if err != nil {
 		return Result{}, fmt.Errorf("failed to embed memory: %w", err)
 	}
@@ -394,6 +433,7 @@ func (d *Deduplicator) insertMemory(mem extractor.ExtractedMemory, vec []float32
 	}
 	m := &store.Memory{
 		Text:        mem.Content,
+		Abstract:    mem.Abstract,
 		Category:    "memory",
 		Scope:       scope,
 		Importance:  mem.Importance,

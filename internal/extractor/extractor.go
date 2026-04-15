@@ -52,6 +52,7 @@ type ExtractedMemory struct {
 	ContentHash string // SHA256[:16] for dedup
 	SourceConv  string // Conversation ID
 	Scope       string // "global" by default, preserved on update
+	Abstract    string // Optional pre-computed summary (Scheme B). If empty and Content is long, dedup will auto-generate via abstractor.
 }
 
 // Message represents a single message in a conversation.

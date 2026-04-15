@@ -6,14 +6,13 @@
 package generator
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/yourusername/hybridmem-rag/internal/llmutil"
 )
 
 // Config holds configuration for the summary generator.
@@ -220,60 +219,16 @@ func (g *Generator) callLLMWithRetry(ctx context.Context, prompt string, maxToke
 	return "", fmt.Errorf("LLM call failed after %d attempts: %w", g.config.MaxRetries+1, lastErr)
 }
 
-// callLLM makes a single OpenAI-compatible chat completion request.
+// callLLM makes a single OpenAI-compatible chat completion request via llmutil.
+// llmutil.CallLLM auto-detects SSE streaming vs JSON response, supporting more endpoints.
 func (g *Generator) callLLM(ctx context.Context, prompt string, maxTokens int) (string, error) {
-	reqBody := map[string]interface{}{
-		"model": g.config.Model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-		"max_tokens":  maxTokens,
-		"temperature": 0.3,
+	cfg := llmutil.Config{
+		APIKey:   g.config.APIKey,
+		Model:    g.config.Model,
+		Endpoint: g.config.Endpoint,
+		Timeout:  g.config.Timeout,
 	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", g.config.Endpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+g.config.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("LLM API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("LLM API error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(data, &apiResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-	if len(apiResp.Choices) == 0 {
-		return "", fmt.Errorf("LLM returned no choices")
-	}
-
-	return apiResp.Choices[0].Message.Content, nil
+	return llmutil.CallLLM(ctx, cfg, prompt, maxTokens, 0.3)
 }
 
 // truncateRunes truncates a string to at most n runes.

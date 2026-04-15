@@ -17,7 +17,7 @@ func main() {
 	}
 	defer app.Close()
 
-	handler := api.NewHandlerWithLLM(app.Store, app.Embedder, app.Consolidator, app.MainLLM)
+	handler := api.NewHandlerWithLLMAndAbstractor(app.Store, app.Embedder, app.Consolidator, app.MainLLM, app.Abstractor())
 
 	addr := envOr("MEMORY_HTTP_ADDR", ":8080")
 	fmt.Printf("Server starting on %s (db=%s)\n", addr, app.DBPath)

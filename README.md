@@ -3,7 +3,17 @@
 > **AI Agent 记忆系统 — 从被动检索到主动知识合成**
 > Pure Go • MCP + HTTP Tool API • Cross-platform • 10k memories in 39ms
 
-[使用指南](./docs/USAGE_GUIDE.md) | [HTTP API](./docs/API.md) | [中文文档](./README_CN.md) | [Architecture](./docs/architecture/INDEX.md) | [Design Doc](./.context/ai-memory-system-design.md)
+**[📘 集成指南 (外部项目接入)](./docs/INTEGRATION_GUIDE.md)** | [使用指南](./docs/USAGE_GUIDE.md) | [HTTP API](./docs/API.md) | [中文文档](./README_CN.md) | [Architecture](./docs/architecture/INDEX.md) | [开发路线图](./docs/DEV_ROADMAP.md)
+
+---
+
+## 🚀 For External Projects
+
+想把 HybridMem-RAG 集成到你的项目？**直接看 [集成指南](./docs/INTEGRATION_GUIDE.md)**。支持三种方式：
+
+- **MCP Server** — Claude Code / Claude Desktop / Cherry Studio / Cline
+- **HTTP API** — Python / Node.js / Java / Rust 任意语言
+- **Go 库** — 直接 `go get` 导入
 
 ---
 

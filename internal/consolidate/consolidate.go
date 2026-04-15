@@ -62,15 +62,162 @@ func New(s store.Store, cfg Config) *Consolidator {
 	}
 }
 
+// MaxGroupSize is the soft cap on memories per consolidation group (Scheme A Phase 1).
+// Groups are formed by BFS over connections; when a group reaches this size, BFS stops.
+const MaxGroupSize = 10
+
+// MinGroupSize is the minimum memory count to consolidate a group.
+const MinGroupSize = 2
+
 // Consolidate analyzes unconsolidated memories and creates a consolidation.
-// Returns nil if not enough memories to consolidate.
+// Returns the first produced consolidation (nil if nothing to consolidate),
+// preserving the old single-result API for backward compatibility.
+//
+// Under the hood, this now delegates to LeafPass which groups by semantic
+// connections rather than consolidating all unconsolidated memories at once.
 func (c *Consolidator) Consolidate(ctx context.Context) (*store.Consolidation, error) {
+	results, err := c.LeafPass(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+	return results[0], nil
+}
+
+// LeafPass groups unconsolidated memories using the connections graph
+// and consolidates each group independently. This produces higher-quality
+// insights because each LLM call processes a semantically coherent set.
+//
+// Algorithm:
+//  1. Fetch up to MaxMemories unconsolidated memories
+//  2. Load their connections (via store.Get since ListUnconsolidated doesn't return them)
+//  3. Build groups via BFS starting from each uncovered memory, following
+//     connections to other unconsolidated memories (cap group size at MaxGroupSize)
+//  4. Consolidate each group of size >= MinGroupSize via LLM
+//  5. Return all successful consolidations
+//
+// Returns consolidations produced (may be empty if no groups meet MinGroupSize).
+func (c *Consolidator) LeafPass(ctx context.Context) ([]*store.Consolidation, error) {
 	memories, err := c.store.ListUnconsolidated(c.config.MaxMemories)
 	if err != nil {
 		return nil, fmt.Errorf("list unconsolidated: %w", err)
 	}
-	if len(memories) < 2 {
-		return nil, nil // not enough memories
+	if len(memories) < MinGroupSize {
+		return nil, nil
+	}
+
+	// Build a set of unconsolidated IDs for quick lookup during BFS
+	uncID := make(map[string]bool, len(memories))
+	for _, m := range memories {
+		uncID[m.ID] = true
+	}
+
+	// Load full memories (with connections) via Get — ListUnconsolidated lacks connections
+	fullByID := make(map[string]*store.Memory, len(memories))
+	for _, m := range memories {
+		full, err := c.store.Get(m.ID)
+		if err != nil || full == nil {
+			full = m // fall back to the partial memory
+		}
+		fullByID[full.ID] = full
+	}
+
+	groups := groupByConnections(memories, fullByID, uncID, MaxGroupSize)
+
+	// Consolidate each eligible group
+	var results []*store.Consolidation
+	for _, group := range groups {
+		if len(group) < MinGroupSize {
+			continue
+		}
+		res, err := c.consolidateGroup(ctx, group)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[consolidate] group of %d failed: %v\n", len(group), err)
+			continue
+		}
+		if res != nil {
+			results = append(results, res)
+		}
+	}
+	return results, nil
+}
+
+// groupByConnections partitions memories into semantically related groups via BFS.
+// A memory and all transitively-connected unconsolidated memories form one group.
+// Groups are capped at maxSize to keep LLM prompts focused.
+//
+// Memories without connections to other unconsolidated ones (or that only form
+// singletons) are batched into "orphan groups" capped at maxSize each, so
+// isolated memories still get consolidated (fallback for cold-start scenarios
+// where connections haven't been established yet).
+func groupByConnections(memories []*store.Memory, fullByID map[string]*store.Memory, uncID map[string]bool, maxSize int) [][]*store.Memory {
+	visited := make(map[string]bool, len(memories))
+	var connectedGroups [][]*store.Memory
+	var orphans []*store.Memory
+
+	for _, seed := range memories {
+		if visited[seed.ID] {
+			continue
+		}
+		// BFS from this seed
+		group := []*store.Memory{fullByID[seed.ID]}
+		visited[seed.ID] = true
+		queue := []string{seed.ID}
+
+		for len(queue) > 0 && len(group) < maxSize {
+			curID := queue[0]
+			queue = queue[1:]
+			cur := fullByID[curID]
+			if cur == nil || cur.Connections == "" || cur.Connections == "[]" {
+				continue
+			}
+			var conns []map[string]string
+			if err := json.Unmarshal([]byte(cur.Connections), &conns); err != nil {
+				continue
+			}
+			for _, conn := range conns {
+				linkedID := conn["linked_to"]
+				if linkedID == "" || visited[linkedID] {
+					continue
+				}
+				if !uncID[linkedID] {
+					continue // only link to other unconsolidated memories
+				}
+				visited[linkedID] = true
+				if full, ok := fullByID[linkedID]; ok {
+					group = append(group, full)
+					queue = append(queue, linkedID)
+					if len(group) >= maxSize {
+						break
+					}
+				}
+			}
+		}
+		// Singletons go to the orphan bucket; real connected groups kept as-is
+		if len(group) == 1 {
+			orphans = append(orphans, group[0])
+		} else {
+			connectedGroups = append(connectedGroups, group)
+		}
+	}
+
+	// Batch orphans into groups of up to maxSize
+	for i := 0; i < len(orphans); i += maxSize {
+		end := i + maxSize
+		if end > len(orphans) {
+			end = len(orphans)
+		}
+		connectedGroups = append(connectedGroups, orphans[i:end])
+	}
+	return connectedGroups
+}
+
+// consolidateGroup runs LLM consolidation on a single semantically-coherent group.
+func (c *Consolidator) consolidateGroup(ctx context.Context, memories []*store.Memory) (*store.Consolidation, error) {
+	if len(memories) < MinGroupSize {
+		return nil, nil
 	}
 
 	// Format for LLM
@@ -82,19 +229,16 @@ func (c *Consolidator) Consolidate(ctx context.Context) (*store.Consolidation, e
 			m.ID, m.Text, m.MemoryType, m.Importance))
 	}
 
-	// Call LLM
 	result, err := c.callLLM(ctx, sb.String())
 	if err != nil {
 		return nil, fmt.Errorf("LLM consolidation: %w", err)
 	}
 
-	// Use LLM-provided source_ids if available, otherwise all
 	sourceIDs := result.SourceIDs
 	if len(sourceIDs) == 0 {
 		sourceIDs = ids
 	}
 
-	// Serialize to JSON
 	sourceIDsJSON, err := json.Marshal(sourceIDs)
 	if err != nil {
 		return nil, fmt.Errorf("marshal source_ids: %w", err)
@@ -122,7 +266,7 @@ func (c *Consolidator) Consolidate(ctx context.Context) (*store.Consolidation, e
 		return nil, fmt.Errorf("store consolidation: %w", err)
 	}
 
-	// Update connections in individual memories (bidirectional)
+	// Update LLM-discovered connections bidirectionally
 	var connErrors []string
 	for _, conn := range result.Connections {
 		fromID, _ := conn["from_id"].(string)
@@ -138,12 +282,10 @@ func (c *Consolidator) Consolidate(ctx context.Context) (*store.Consolidation, e
 			connErrors = append(connErrors, fmt.Sprintf("%s→%s: %v", toID, fromID, err))
 		}
 	}
-	// Log connection errors (don't fail consolidation for partial graph issues)
 	if len(connErrors) > 0 {
 		fmt.Fprintf(os.Stderr, "warning: %d connection update errors during consolidation\n", len(connErrors))
 	}
 
-	// Mark source memories as consolidated
 	if err := c.store.MarkConsolidated(sourceIDs); err != nil {
 		return nil, fmt.Errorf("mark consolidated: %w", err)
 	}

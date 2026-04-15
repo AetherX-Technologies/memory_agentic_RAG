@@ -433,6 +433,27 @@ func main() {
 	}
 
 	// ══════════════════════════════════════════════════════════
+	section("12.5 方案 A-Phase1 — Leaf 语义分组 Consolidation")
+	// ══════════════════════════════════════════════════════════
+
+	if app.Consolidator != nil {
+		leafResults, err := app.Consolidator.LeafPass(context.Background())
+		if err != nil {
+			fail("LeafPass 失败: %v", err)
+		} else {
+			fmt.Printf("   LeafPass 产生 %d 个 consolidation\n", len(leafResults))
+			if len(leafResults) > 0 {
+				pass(fmt.Sprintf("LeafPass 生成 insight: %s", truncate(leafResults[0].Insight, 50)))
+			} else {
+				fmt.Println("   ℹ️  无新 consolidation（所有记忆已聚合或分组过小）")
+				pass("LeafPass 正常返回（无可聚合组）")
+			}
+		}
+	} else {
+		fmt.Println("   ⚠️  Consolidator 未配置 — 跳过")
+	}
+
+	// ══════════════════════════════════════════════════════════
 	section("13. 方案 B — 长文本自动摘要 + Abstract 嵌入")
 	// ══════════════════════════════════════════════════════════
 

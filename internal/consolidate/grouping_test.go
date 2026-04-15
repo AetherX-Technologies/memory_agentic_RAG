@@ -99,6 +99,69 @@ func TestGroupByConnections_CapAtMaxSize(t *testing.T) {
 	}
 }
 
+func TestGroupByConnections_LargeClusterSplitsIntoMultipleGroups(t *testing.T) {
+	// 12 memories all connected in a clique; with maxSize=5, should produce
+	// 3 groups (5+5+2), NOT 1 capped group + 7 stranded singletons.
+	const N = 12
+	mems := make([]*store.Memory, N)
+	for i := 0; i < N; i++ {
+		id := "m"
+		if i < 10 {
+			id += string(rune('0' + i))
+		} else {
+			id += "1" + string(rune('0'+i%10))
+		}
+		// Each memory connects to all others
+		var links string = "["
+		first := true
+		for j := 0; j < N; j++ {
+			if j == i {
+				continue
+			}
+			otherID := "m"
+			if j < 10 {
+				otherID += string(rune('0' + j))
+			} else {
+				otherID += "1" + string(rune('0'+j%10))
+			}
+			if !first {
+				links += ","
+			}
+			first = false
+			links += `{"linked_to":"` + otherID + `","relationship":"r"}`
+		}
+		links += "]"
+		mems[i] = &store.Memory{ID: id, Text: "x", Connections: links}
+	}
+
+	fullByID := make(map[string]*store.Memory)
+	uncID := make(map[string]bool)
+	for _, m := range mems {
+		fullByID[m.ID] = m
+		uncID[m.ID] = true
+	}
+
+	groups := groupByConnections(mems, fullByID, uncID, 5)
+
+	// Count memories consolidated (groups with size >= 2)
+	consolidated := 0
+	for _, g := range groups {
+		if len(g) >= 2 {
+			consolidated += len(g)
+		}
+	}
+	if consolidated < N {
+		t.Errorf("large cluster stranded %d memories (got %d/%d consolidated)", N-consolidated, consolidated, N)
+	}
+
+	// Verify no group exceeds maxSize
+	for i, g := range groups {
+		if len(g) > 5 {
+			t.Errorf("group %d has %d nodes, exceeds maxSize=5", i, len(g))
+		}
+	}
+}
+
 func TestGroupByConnections_ExcludesConsolidated(t *testing.T) {
 	// m1 connects to m2 (unconsolidated) and m3 (already consolidated)
 	// m3 should be filtered out

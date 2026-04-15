@@ -842,22 +842,36 @@ func (s *Service) Consolidate(ctx context.Context) (*ConsolidateResponse, error)
 		}, nil
 	}
 
-	result, err := s.consolidator.Consolidate(ctx)
+	// Use LeafPass to get per-group results; aggregate for the response.
+	// Under A-Phase1, consolidation produces multiple per-topic records.
+	results, err := s.consolidator.LeafPass(ctx)
 	if err != nil {
 		return nil, &ToolError{Code: ErrorCodeInternal, Message: "consolidation failed", Err: err}
 	}
-	if result == nil {
+	if len(results) == 0 {
 		return &ConsolidateResponse{
 			Status: "skipped",
-			Reason: "insufficient memories",
+			Reason: "insufficient memories in any connected group",
 		}, nil
+	}
+
+	// Aggregate insights from all groups; use first group's summary as representative.
+	var insights []string
+	for _, r := range results {
+		if r.Insight != "" {
+			insights = append(insights, r.Insight)
+		}
+	}
+	aggregatedInsight := strings.Join(insights, " | ")
+	if aggregatedInsight == "" {
+		aggregatedInsight = results[0].Insight
 	}
 
 	newCount, _ := s.store.CountUnconsolidated()
 	return &ConsolidateResponse{
 		Status:         "completed",
-		Insight:        result.Insight,
-		Summary:        result.Summary,
+		Insight:        aggregatedInsight,
+		Summary:        results[0].Summary,
 		Consolidated:   count - newCount,
 		Unconsolidated: newCount,
 	}, nil

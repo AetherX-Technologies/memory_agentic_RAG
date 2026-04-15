@@ -126,20 +126,32 @@ func (c *Consolidator) LeafPass(ctx context.Context) ([]*store.Consolidation, er
 
 	groups := groupByConnections(memories, fullByID, uncID, MaxGroupSize)
 
-	// Consolidate each eligible group
+	// Consolidate each eligible group; track failures vs groups that were too small.
 	var results []*store.Consolidation
+	var lastErr error
+	eligible := 0
+	failed := 0
 	for _, group := range groups {
 		if len(group) < MinGroupSize {
 			continue
 		}
+		eligible++
 		res, err := c.consolidateGroup(ctx, group)
 		if err != nil {
+			failed++
+			lastErr = err
 			fmt.Fprintf(os.Stderr, "[consolidate] group of %d failed: %v\n", len(group), err)
 			continue
 		}
 		if res != nil {
 			results = append(results, res)
 		}
+	}
+
+	// If every eligible group failed, surface the error so callers can distinguish
+	// real failures from "no groups met MinGroupSize".
+	if eligible > 0 && failed == eligible {
+		return nil, fmt.Errorf("all %d eligible groups failed, last error: %w", failed, lastErr)
 	}
 	return results, nil
 }
@@ -152,6 +164,15 @@ func (c *Consolidator) LeafPass(ctx context.Context) ([]*store.Consolidation, er
 // singletons) are batched into "orphan groups" capped at maxSize each, so
 // isolated memories still get consolidated (fallback for cold-start scenarios
 // where connections haven't been established yet).
+//
+// Known Phase 1 limitation (star topology):
+// When a high-degree "hub" node is consumed by an earlier group, remaining
+// leaves of the same star cluster reach each other only via the now-visited
+// hub. BFS skips visited nodes, so those leaves become singletons and fall
+// into the orphan batch. They still get consolidated (no data loss), but may
+// be grouped with unrelated orphans rather than with their semantic peers.
+// Proper fix requires multi-depth condensation (Phase 2) which re-groups
+// leaf consolidations by topic after the leaf pass completes.
 func groupByConnections(memories []*store.Memory, fullByID map[string]*store.Memory, uncID map[string]bool, maxSize int) [][]*store.Memory {
 	visited := make(map[string]bool, len(memories))
 	var connectedGroups [][]*store.Memory
@@ -185,13 +206,17 @@ func groupByConnections(memories []*store.Memory, fullByID map[string]*store.Mem
 				if !uncID[linkedID] {
 					continue // only link to other unconsolidated memories
 				}
-				visited[linkedID] = true
 				if full, ok := fullByID[linkedID]; ok {
-					group = append(group, full)
-					queue = append(queue, linkedID)
+					// Only mark visited when actually adding to this group.
+					// This lets BFS stop at maxSize while leaving remaining
+					// connected neighbors available for a subsequent seed
+					// (prevents stranding the 11th+ node of a large cluster).
 					if len(group) >= maxSize {
 						break
 					}
+					visited[linkedID] = true
+					group = append(group, full)
+					queue = append(queue, linkedID)
 				}
 			}
 		}

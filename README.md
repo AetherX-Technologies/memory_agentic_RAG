@@ -1,50 +1,71 @@
 # HybridMem-RAG
 
-> **AI Agent 记忆系统 — 从被动检索到主动知识合成**
+> **AI Agent Memory Backend — From Passive Retrieval to Active Knowledge Synthesis**
 > Pure Go • MCP + HTTP Tool API • Cross-platform • 10k memories in 39ms
 
-**[📘 集成指南 (外部项目接入)](./docs/INTEGRATION_GUIDE.md)** | [使用指南](./docs/USAGE_GUIDE.md) | [HTTP API](./docs/API.md) | [中文文档](./README_CN.md) | [Architecture](./docs/architecture/INDEX.md) | [开发路线图](./docs/DEV_ROADMAP.md)
+**[📘 Integration Guide](./docs/INTEGRATION_GUIDE.md)** | [Usage Guide](./docs/USAGE_GUIDE.md) | [HTTP API](./docs/API.md) | [Architecture](./docs/architecture/INDEX.md) | [Dev Roadmap](./docs/DEV_ROADMAP.md) | [中文文档](./README_CN.md)
 
 ---
 
 ## 🚀 For External Projects
 
-想把 HybridMem-RAG 集成到你的项目？**直接看 [集成指南](./docs/INTEGRATION_GUIDE.md)**。支持三种方式：
+Want to integrate HybridMem-RAG into your project? See the **[Integration Guide](./docs/INTEGRATION_GUIDE.md)**. Three supported paths:
 
 - **MCP Server** — Claude Code / Claude Desktop / Cherry Studio / Cline
-- **HTTP API** — Python / Node.js / Java / Rust 任意语言
-- **Go 库** — 直接 `go get` 导入
+- **HTTP API** — Python / Node.js / Java / Rust / any language
+- **Go Library** — `go get` import
 
 ---
 
 ## What is HybridMem-RAG?
 
-一个完整的 **AI Agent 长期记忆后端**，自动从对话中提取、去重、存储、评分、合并记忆，并通过 MCP 和 HTTP Tool API 暴露给 Claude Code / Chatbox 等 AI Agent。
+A complete **AI Agent long-term memory backend** that automatically extracts, deduplicates, stores, scores, and consolidates memories from conversations. Exposed via MCP and HTTP Tool APIs to AI agents like Claude Code and Chatbox.
 
 ```
-用户消息 → ShouldCapture? → 记忆提取(LLM) → 噪音过滤 → 去重/冲突检测 → 存储
-                                                                         ↓
-MCP 9工具 ← 格式化上下文 ← MMR多样性 ← 混合检索 + 时间衰减 ← ShouldRetrieve?
-                                                                         ↓
-                                        定时合并 → 发现关联/模式/洞察 → 限流/日志
+User message → ShouldCapture? → Extract (LLM) → Noise filter → Dedup/Conflict → Store
+                                                                                    ↓
+MCP 9 tools ← Format context ← MMR diversity ← Hybrid search ← ShouldRetrieve?
+                                                                                    ↓
+                                    Leaf consolidation → Cross-memory insights → Rate limit/log
 ```
 
-### Core Features
+---
+
+## ✨ Latest Capabilities (v2)
+
+Built on top of the v1 baseline (hybrid search, FastText triggers, dedup, consolidation). The v2 additions:
+
+| Capability | What it does |
+|-----------|-------------|
+| **Smart Memory Association** | Auto-builds bidirectional `connections` during store-time (cosine 0.7–0.85); recall expands into linked memories as 🔗 Related Memories section |
+| **Long-Text Auto-Abstract** | Content >500 tokens auto-summarized via small LLM; embedding uses Abstract while Text preserved for FTS. Real compression: **up to 423×** on 15k-token documents |
+| **Leaf Semantic Grouping** | Consolidation now groups memories by `connections` graph (BFS, max 10 per group) instead of blindly taking newest 50. Orphan fallback for cold-start |
+| **Embedder-Specific Profiles** | Thresholds tuned per embedder (Qwen3-0.6B local, Qwen3-4B API, Jina v3, OpenAI v3). Unknown models auto-calibrate via 23-pair benchmark, cached to `~/.hybridmem/` |
+| **Dual-Tier LLM Config** | Main model (e.g. `gpt-4o`) for deep reasoning; optional **summary model** (e.g. `gpt-4o-mini`) for abstract generation — separate key/endpoint/timeout |
+| **CJK-Aware Token Budget** | `max_tokens` parameter with accurate CJK estimation (CJK ×1.5, ASCII ×0.25, Emoji ×2.0). Error <10% vs cl100k_base |
+| **Tags Persistence** | Fully wired across store/update/export/import; `*[]string` pointer type to distinguish keep vs clear |
+| **SourceConv Filtering** | Recall by conversation ID (`source_conv` param), display `[conv:id]` suffix |
+
+See [SMART_ASSOCIATION.md](./docs/SMART_ASSOCIATION.md) for technical details.
+
+---
+
+## Core Features
 
 | Feature | Description |
 |---------|-------------|
-| **记忆提取** | LLM 自动提取 6 种记忆类型（fact/preference/skill/episode/instruction/relationship），fallback 规则提取 |
-| **智能去重** | content_hash 精确去重 + 向量语义去重（>0.93）+ LLM 冲突检测 |
-| **混合检索** | BM25 + Vector + **加权 RRF 融合** + Reranking + 分层检索 + CJK 停用词优化 |
-| **评分管道** | 新近度衰减 + 重要性加权 + 置信度 + 访问频率 + 类型差异化半衰期 + **乘法时间衰减** |
-| **自动触发** | **FastText ML 分类器** (CJK + EN, 98%+ accuracy) + ShouldRetrieve 自适应跳过（~60-70% 无效查询被跳过） |
-| **噪音过滤** | AI 否认/元问题/样板文本自动过滤，防止垃圾记忆 |
-| **MMR 多样性** | 最大边际相关性去重，避免 top-K 充斥重复内容 |
-| **垃圾桶** | 软删除 → 30天恢复期 → 永久清理（无数据直接丢失） |
-| **记忆合并** | 定时 LLM 分析，发现跨记忆关联/模式/洞察，构建知识图谱 |
-| **MCP Server** | 9 个工具，stdio JSON-RPC，兼容 Claude Code / Chatbox |
-| **HTTP Tool API** | `/api/v1/tools` + `/api/v1/tools/call` + tool aliases，语义与 MCP 工具对齐 |
-| **限流** | 20 ops/min, 200 ops/hour 防止记忆膨胀 |
+| **Memory Extraction** | Auto-extract 6 types (fact/preference/skill/episode/instruction/relationship) via LLM, with rule-based fallback |
+| **Smart Dedup** | content_hash exact + vector semantic (>0.93 calibrated) + LLM conflict detection |
+| **Hybrid Search** | BM25 + Vector + **Weighted RRF** + Reranking + Hierarchical + CJK-aware |
+| **Scoring Pipeline** | Recency decay + importance + confidence + access frequency + type-aware half-life + **multiplicative decay** |
+| **Auto Triggers** | **FastText ML classifier** (CJK + EN, 98%+ accuracy) + ShouldRetrieve adaptive skip (~60–70% invalid queries dropped) |
+| **Noise Filter** | AI negation / meta questions / boilerplate filtered to prevent junk memories |
+| **MMR Diversity** | Maximal Marginal Relevance to avoid duplicate top-K |
+| **Trash / Restore** | Soft delete → 30-day grace → permanent cleanup |
+| **Consolidation** | LLM-powered pattern discovery across memories, now with **semantic leaf grouping** (v2) |
+| **MCP Server** | 9 tools, stdio JSON-RPC, compatible with Claude Code / Chatbox |
+| **HTTP Tool API** | `/api/v1/tools` + `/api/v1/tools/call` + tool aliases, semantically aligned with MCP |
+| **Rate Limiting** | 20 ops/min, 200 ops/hour to prevent memory bloat |
 
 ---
 
@@ -56,83 +77,106 @@ MCP 9工具 ← 格式化上下文 ← MMR多样性 ← 混合检索 + 时间衰
 | 1,000 | 268µs | 3.6ms | 3.6ms | 2.1ms |
 | **10,000** | **248µs** | **39.4ms** | **38.2ms** | **21.6ms** |
 
-*Tested on Apple Silicon, SQLite FTS5, 128-dim vectors*
+*Tested on Apple Silicon, SQLite FTS5, 128-dim vectors.*
+
+Real-document test (5 files, 130KB, 55k tokens total):
+- Long-text abstracts generated in **~2–3s each** via gpt-4o-mini
+- Consolidation across 5 docs: **~52s** producing high-quality insights
+- Token compression: **214× to 344×** average
 
 ---
 
 ## Quick Start
 
-### Build
+### 1. Build
 
 ```bash
 git clone https://github.com/AetherX-Technologies/memory_agentic_RAG.git
 cd memory_agentic_RAG
-# Build FastText C++ library first (one-time)
+
+# Build FastText C++ library (one-time)
 git clone --depth 1 https://github.com/facebookresearch/fastText.git /tmp/fasttext
-cd /tmp/fasttext && mkdir build && cd build && cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && make -j$(nproc)
-cp /tmp/fasttext/build/libfasttext_pic.a /path/to/memory_agentic_RAG/internal/fasttext/lib/libfasttext.a
+cd /tmp/fasttext && mkdir build && cd build
+cmake .. -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+make -j$(nproc)
+cp /tmp/fasttext/build/libfasttext_pic.a \
+   /path/to/memory_agentic_RAG/internal/fasttext/lib/libfasttext.a
 
 # Build binaries
 cd /path/to/memory_agentic_RAG
-CGO_ENABLED=1 go build -tags fts5 -o hybridmem-mcp ./cmd/mcp_server/
+CGO_ENABLED=1 go build -tags fts5 -o hybridmem-mcp    ./cmd/mcp_server/
 CGO_ENABLED=1 go build -tags fts5 -o hybridmem-server ./cmd/server/
 ```
 
-### Run as MCP Server (for Claude Code)
+### 2. Configure
 
-```bash
-export MEMORY_DB_PATH=memory.db
-./hybridmem-mcp
+Create `config.local.yaml` (gitignored — contains your API keys):
+
+```yaml
+embedding:
+  provider: "local"                                    # or "openai" / "jina"
+  local:
+    model_path: "models/qwen3-embedding-0.6b-onnx-uint8/dynamic_uint8.onnx"
+
+llm:
+  api_key: "YOUR_MAIN_LLM_KEY"
+  model: "gpt-4o"                                      # for consolidation / conflict detection
+  endpoint: "https://api.openai.com/v1/chat/completions"
+  timeout: 30
+
+  summary:                                             # optional: small model for lightweight tasks
+    api_key: "YOUR_LLM_KEY"
+    model: "gpt-4o-mini"
+    endpoint: "https://api.openai.com/v1/chat/completions"
+    timeout: 30
 ```
 
-### Configure Claude Code
-
-Add to your Claude Code MCP settings:
+### 3. Run as MCP Server
 
 ```json
+// ~/Library/Application Support/Claude/claude_desktop_config.json
 {
   "mcpServers": {
     "memory": {
-      "command": "/path/to/hybridmem-mcp",
+      "command": "/absolute/path/to/hybridmem-mcp",
       "env": {
-        "MEMORY_DB_PATH": "/path/to/memory.db"
+        "MEMORY_CONFIG_PATH": "/absolute/path/to/config.local.yaml"
       }
     }
   }
 }
 ```
 
-### Run as HTTP Server
+### 3. Run as HTTP Server
 
 ```bash
 MEMORY_HTTP_ADDR=127.0.0.1:8080 \
-MEMORY_DB_PATH=memory.db \
+MEMORY_CONFIG_PATH=/path/to/config.local.yaml \
 ./hybridmem-server
 ```
 
-HTTP reference:
-
+Reference:
 - [HTTP API](./docs/API.md)
-- [Usage Guide](./docs/USAGE_GUIDE.md#5-http-api-使用)
-- [HTTP Test Report](./docs/HTTP_TEST_REPORT.md)
+- [Integration Guide](./docs/INTEGRATION_GUIDE.md)
+- [Usage Guide](./docs/USAGE_GUIDE.md)
 
-### Run Tests
+### 4. Run Tests
 
 ```bash
-# Unit tests (12 packages)
+# Unit tests (14 packages)
 go test -tags fts5 ./internal/...
 
-# Full integration test (A→G, 21 assertions)
+# Full integration test (mock embedder)
 go run -tags fts5 ./cmd/full_memory_test/
 
-# Trigger + MMR + TimeDecay test (93 assertions)
-go run -tags fts5 ./cmd/trigger_test/
+# Real production-model test (ONNX + FastText + remote LLM)
+go run -tags fts5 ./cmd/realtest/
 
-# Performance benchmark
-go run -tags fts5 ./cmd/benchmark_memory/
+# Real document test (~/Downloads files)
+go run -tags fts5 ./cmd/realdoc_test/
 
-# Real LLM test (requires API key)
-MEMORY_LLM_KEY=your_key go run -tags fts5 ./cmd/real_llm_test/
+# Cosine calibration against real embedder
+go run -tags fts5 ./cmd/calibration_test/
 ```
 
 ---
@@ -141,151 +185,110 @@ MEMORY_LLM_KEY=your_key go run -tags fts5 ./cmd/real_llm_test/
 
 | Tool | Description |
 |------|-------------|
-| `memory_store` | 存储记忆（自动去重 + content_hash + **噪音过滤**） |
-| `memory_recall` | 语义检索 + **自适应跳过** + **MMR多样性** + 格式化上下文 + 合并洞察（显式 "记住/remember" 时自动存储） |
-| `memory_forget` | 软删除（移入垃圾桶，30天可恢复） |
-| `memory_update` | 更新内容（自动重新向量化）或元数据 |
-| `memory_export` | 全量导出为 JSON（备份） |
-| `memory_import` | 批量导入（恢复备份） |
-| `memory_forget_by_tag` | 按标签批量删除（PII 清理等） |
-| `memory_consolidate` | 触发记忆合并，发现关联和模式 |
-| `memory_should_capture` | **判断文本是否值得存储**（FastText ML + 触发词 + 噪音预检） |
+| `memory_store` | Store memory (auto dedup + content_hash + noise filter + optional tags) |
+| `memory_recall` | Semantic search + adaptive skip + MMR + formatted context + consolidation insights + connection expansion |
+| `memory_forget` | Soft delete (recoverable within 30 days) |
+| `memory_update` | Update content (auto re-vectorize) or metadata |
+| `memory_export` | Full JSON backup (includes Abstract + tags) |
+| `memory_import` | Bulk restore |
+| `memory_forget_by_tag` | Batch delete by tag (PII cleanup etc.) |
+| `memory_consolidate` | Trigger leaf-grouped LLM consolidation |
+| `memory_should_capture` | Pre-check if text is worth storing (FastText ML + triggers + noise) |
 
 ---
 
 ## Trigger System
 
-自动判断 **什么时候该存** 和 **什么时候该查**，无需模型主动调用工具。
+Auto-decides **when to store** and **when to search** — no model-side tool-call required.
 
-### ShouldCapture — 自动触发存储
-
-```
-用户消息 → 显式触发词("记住"/"remember")              → 存储 (confidence=0.95)
-         → FastText ML 分类器 (CJK/EN 双模型)
-           ├── skip (confidence ≥ 0.61)              → 跳过
-           ├── capture (confidence ≥ 0.61)           → 存储 (confidence=0.85)
-           └── uncertain                              → 回退规则
-         → 隐式自述("我是"/"I am"/"我喜欢")          → 存储 (confidence=0.7)
-         → 正则模式(邮箱/电话/日期)                   → 存储 (confidence=0.6)
-         → 无触发 / 太短 / 太长                       → 跳过
-```
-
-**FastText 模型** (1.7MB x2, 0.002ms/条):
-- CJK 模型: 字级 tokenization, 98.67% 精度
-- EN 模型: 词级 tokenization, 99.1% 精度
-- 自动语言路由: `textIsCJK()` 判断 → CJK/EN 模型
-- 解决了 "你觉得我是怎样一个人呀" 命中 "我是" 规则的误捕获问题
-
-### ShouldRetrieve — 自适应检索跳过
+### ShouldCapture — Auto-store triggers
 
 ```
-检索请求 → 强制检索("记得吗"/"remember"/"my name") → 执行检索
-         → 跳过模式("hi"/"ok"/"git status"/emoji)   → 返回空
-         → 默认                                       → 执行检索
+User message → Explicit trigger ("记住" / "remember")            → Store (conf=0.95)
+             → FastText ML classifier (CJK/EN dual models)
+               ├── skip (conf ≥ 0.61)                           → Skip
+               ├── capture (conf ≥ 0.61)                        → Store (conf=0.85)
+               └── uncertain                                     → Rule fallback
+             → Implicit self-reference ("我是" / "I am" / "I like") → Store (conf=0.7)
+             → Regex patterns (email / phone / date)            → Store (conf=0.6)
+             → No trigger / too short / too long                 → Skip
 ```
 
-**~60-70% 的无效查询被跳过**，大幅降低延迟和成本。
+**FastText models** (1.7MB × 2, 0.002ms/prediction):
+- CJK model: character-level tokenization, 98.67% accuracy
+- EN model: word-level tokenization, 99.1% accuracy
+- Auto language routing via `textIsCJK()`
 
-### IsNoise — 噪音过滤
+### ShouldRetrieve — Adaptive search skip
 
-| 噪音类型 | 示例 | 处理 |
-|---------|------|------|
-| AI 否认 | "I don't have any information" | 不存储 |
-| 元问题 | "do you remember" | 不存储 |
-| 样板文本 | "hello" / "thanks" / "HEARTBEAT" | 不存储 |
+```
+Query → Force patterns ("记得吗" / "remember" / "my name") → Search
+      → Skip patterns ("hi" / "ok" / "git status" / emoji)  → Empty result
+      → Default                                              → Search
+```
+
+**~60–70% of trivial queries are skipped**, drastically reducing latency and cost.
+
+### IsNoise — Noise filtering
+
+Blocks AI negations, meta-questions, and boilerplate from polluting storage.
 
 ---
 
-## Scoring Pipeline
+## Architecture Highlights
+
+### Smart Memory Association Pipeline
 
 ```
-原始分数 → 新近度提升(加法) → 重要性加权 → 长度归一化
-         → 置信度加权 → 访问频率提升 → 时间衰减(乘法) → MMR多样性
+StoreWithDedup:
+  1. Embed (uses Abstract if long content, else Text)
+  2. VectorSearch candidates
+  3. content_hash exact check → skip or update confidence
+  4. Semantic dedup (cosine > DupThreshold, calibrated per-model)
+  5. Conflict detection (LLM judgment) → supersede if contradictory
+  6. Insert new memory
+  7. buildConnectionsFiltered — link to related memories (cosine 0.7–0.85)
+
+Recall:
+  1. Hybrid search (vector + BM25 + weighted RRF)
+  2. Rerank (optional Jina)
+  3. MMR diversity
+  4. Filter by type / importance / source_conv
+  5. expandConnections — pull linked memories (top 3 seeds, deduped)
+  6. Format: 📌 Instruction | 💡 Preference | 👤 Fact | 🔧 Skill
+           | 🔗 Related Memories | 🧠 Insights (from consolidation)
 ```
 
-### Multiplicative Time Decay
+### Auto-Calibration Flow
 
 ```
-score *= floor + (1 - floor) × exp(-ln(2) × age / halfLife)
+bootstrap.Load()
+  → detectModelName ("openai:Qwen/Qwen3-Embedding-4B")
+  → LoadCachedCalibration → hit? use it
+  → miss? Calibrate:
+      23-pair benchmark (7 dup + 9 related + 7 unrelated)
+      Compute stats: min/max per category
+      Derive DupThreshold / ConflictThreshold / ConnectionBand
+      Save to ~/.hybridmem/calibration.json
 ```
-
-- **半衰期**: 可配置（默认 60 天）
-- **地板值**: 可配置（默认 0.5，旧记忆永不归零）
-- **精确半衰期**: 使用 `ln(2)` 保证在 halfLife 天时恰好衰减到预期值
-
-### MMR Diversity Reranking
-
-- **lambda**: 0.7（相关性 vs 多样性平衡）
-- **阈值**: 0.85（超过此相似度的候选大幅降权 70%）
-- **空向量安全**: BM25-only 结果不参与相似度惩罚
-- **不变性**: 不修改输入切片
 
 ---
 
-## Architecture
+## Documentation
 
-```
-internal/
-├── trigger/         # 自动触发: ShouldCapture (FastText ML) + ShouldRetrieve + IsNoise
-├── fasttext/        # FastText CGO bridge: model loading + prediction + char/word tokenization
-├── store/           # SQLite storage + vector search + scoring + trash + MMR
-├── extractor/       # LLM memory extraction + fallback rules + JSON parser
-├── dedup/           # Semantic dedup + conflict resolution + content_hash
-├── consolidate/     # Memory consolidation + scheduler + connection graph
-├── mcp/             # MCP Server (stdio JSON-RPC, 9 tools)
-├── ratelimit/       # Sliding-window rate limiter
-├── memlog/          # Structured JSON logging (slog)
-├── llmutil/         # Shared LLM client (SSE streaming + JSON fallback)
-├── config/          # Unified YAML config
-├── embedder/        # Local ONNX embedding (Qwen3-0.6B)
-├── generator/       # L0/L1 summary generation
-├── parser/          # Document splitting (structural + semantic)
-├── retrieval/       # OpenViking hierarchical retrieval
-└── api/             # HTTP Tool API + legacy REST
-```
-
-### Memory Types
-
-| Type | Half-life | Example |
-|------|-----------|---------|
-| `instruction` | 365 days | "请用中文回复" |
-| `fact` | 90 days | "用户是西北院工程师" |
-| `preference` | 90 days | "喜欢简洁代码风格" |
-| `skill` | 180 days | "Go 后端 3 年经验" |
-| `relationship` | 90 days | "Alice 是 Bob 的上级" |
-| `episode` | 30 days | "昨天讨论了监测系统" |
-
----
-
-## Development
-
-### Project Stats
-
-- **Phases**: A→G + Trigger Enhancement + Retrieval Quality + FastText Integration
-- **Codex Reviews**: 50+ rounds
-- **Bugs Fixed**: 100+
-- **Test Coverage**: 93 trigger assertions + 18 FastText acceptance tests + 21 integration assertions + 50+ unit tests
-- **Real LLM Verified**: Extraction (10 memories) + Consolidation (insights)
-
-### Key Design Decisions
-
-1. **SQLite over LanceDB** — Pure Go + minimal CGO (FastText), cross-platform
-2. **Soft-delete over hard-delete** — 30-day trash bin, all cleanup reversible
-3. **SSE streaming LLM** — Auto-detects stream vs JSON, compatible with all APIs
-4. **Fallback extraction** — Rule-based extraction when LLM unavailable
-5. **No auto-supersede without LLM** — Prevents incorrect importance decay
-6. **Force-retrieve before length filter** — Short recall queries ("记得吗") never blocked
-7. **MMR after full pool, not after truncation** — Diverse candidates from positions N+1..3N can replace duplicates
-8. **FastText over rules for ShouldCapture** — ML classifier (98%+) replaces fragile regex for capture/skip decisions
-9. **Weighted RRF over score-based fusion** — Rank-based fusion eliminates BM25/vector score scale mismatch
-10. **Explicit-only auto-capture** — Only "记住/remember" triggers auto-store during recall, preventing query self-pollution
+| Document | Audience |
+|----------|---------|
+| [Integration Guide](./docs/INTEGRATION_GUIDE.md) | External project developers |
+| [Usage Guide](./docs/USAGE_GUIDE.md) | End-users of the MCP/HTTP APIs |
+| [HTTP API Reference](./docs/API.md) | REST API users |
+| [Architecture Index](./docs/architecture/INDEX.md) | System architecture overview |
+| [Smart Association](./docs/SMART_ASSOCIATION.md) | v2 feature technical doc |
+| [Dev Roadmap](./docs/DEV_ROADMAP.md) | Contributors, future planning |
+| [Next Phase Proposal](./docs/NEXT_PHASE_PROPOSAL.md) | Architects, design review |
+| [Deployment](./docs/DEPLOYMENT.md) | Ops / deployment engineers |
 
 ---
 
 ## License
 
-MIT License
-
----
-
-**Built with Go + SQLite + Claude Opus 4.6 + Codex gpt-5.4**
+MIT

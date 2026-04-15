@@ -128,6 +128,7 @@ type ExportRequest struct {
 type ExportedMemory struct {
 	ID         string   `json:"id"`
 	Content    string   `json:"content"`
+	Abstract   string   `json:"abstract,omitempty"` // Scheme B: preserve generated abstract across export/import
 	Type       string   `json:"type"`
 	Importance float64  `json:"importance"`
 	Confidence float64  `json:"confidence"`
@@ -147,6 +148,7 @@ type ImportRequest struct {
 
 type ImportMemory struct {
 	Content    string   `json:"content"`
+	Abstract   string   `json:"abstract,omitempty"` // Scheme B: restore pre-existing abstract
 	Type       string   `json:"type"`
 	Importance float64  `json:"importance"`
 	Confidence float64  `json:"confidence"`
@@ -695,6 +697,7 @@ func (s *Service) Export(_ context.Context, req ExportRequest) (*ExportResponse,
 		exported = append(exported, ExportedMemory{
 			ID:         m.ID,
 			Content:    m.Text,
+			Abstract:   m.Abstract,
 			Type:       m.MemoryType,
 			Importance: m.Importance,
 			Confidence: m.Confidence,
@@ -738,6 +741,7 @@ func (s *Service) Import(_ context.Context, req ImportRequest) (*ImportResponse,
 		h := sha256.Sum256([]byte(m.Content))
 		mem := &store.Memory{
 			Text:        m.Content,
+			Abstract:    m.Abstract, // Scheme B: restore preserved abstract
 			Category:    "memory",
 			Scope:       "global",
 			Importance:  m.Importance,
@@ -748,8 +752,13 @@ func (s *Service) Import(_ context.Context, req ImportRequest) (*ImportResponse,
 			ContentHash: hex.EncodeToString(h[:8]),
 		}
 
+		// Embed using Abstract if present (matches dedup's long-text behavior)
 		if s.embedder != nil {
-			if v, err := s.embedder.Embed(m.Content); err == nil {
+			embedTarget := m.Content
+			if m.Abstract != "" {
+				embedTarget = m.Abstract
+			}
+			if v, err := s.embedder.Embed(embedTarget); err == nil {
 				mem.Vector = v
 			}
 		}

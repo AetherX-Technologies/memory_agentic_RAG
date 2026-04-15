@@ -25,6 +25,7 @@
 1. **Consolidation 仍然是"盲"的** — 取最新 50 条（按时间倒序），不按语义分组
 2. **无长文本保护** — 超长记忆浪费存储和搜索性能
 3. **Consolidation LLM 无降级** — consolidation 失败即终止（冲突检测已有 fallback）
+4. **所有 LLM 任务都走主模型** — 摘要/提取这种轻量任务也用贵的模型，成本浪费
 
 ---
 
@@ -158,6 +159,43 @@ if estimateTokens(content) > MaxMemoryTokens (默认 500):
 - Connection 建立基于 Abstract 的相似度而非原文
 - **建议**：B 方案上线后触发一次自动重校准
 
+### 3.6 摘要模型分离（配置需求）
+
+**用户需求**：摘要生成这种轻量任务不应占用主 LLM（gpt-5.4 等），应该能指定便宜的小模型（gpt-4o-mini 等）。
+
+**方案**：`config.local.yaml` 的 `llm` 下新增可选 `summary` 子配置：
+
+```yaml
+llm:
+  provider: "openai"
+  api_key: "clp_..."           # 主模型 key
+  model: "gpt-5.4"             # 主模型：consolidation、冲突检测、深度推理
+  endpoint: "https://api-vip.codex-for.me/v1/chat/completions"
+
+  summary:                      # 可选：摘要/结构化提取等轻量任务
+    api_key: ""                # 空 = 继承主 key
+    model: "gpt-4o-mini"
+    endpoint: ""               # 空 = 继承主 endpoint
+```
+
+**使用策略**：
+
+| 任务 | 用哪个模型 | 理由 |
+|------|-----------|------|
+| 方案 B: 长文本摘要生成 | summary（或 fallback 主） | 结构化任务，小模型足够 |
+| 方案 A-Phase2: condensation 摘要 | summary（或 fallback 主） | 同上 |
+| 当前 consolidation | 主 LLM | 需要跨记忆推理发现模式 |
+| 当前冲突检测 | 主 LLM | 需要语义理解（可选改为 summary） |
+| 未来 episode 提取 | summary | 简单分类任务 |
+
+**实现要点**：
+- `consolidate.Config` 新增 `SummaryLLMKey/Model/Endpoint` 字段（optional）
+- `llmutil` 新增 `CallSummaryLLM()`——自动 fallback 到主配置
+- bootstrap 从 `cfg.LLM.Summary` 读取
+- **向后兼容**：如果 `summary` 未配置，所有任务仍用主 LLM
+
+**工作量**：~50 行配置 + ~30 行 llmutil 路由 = 约 80 行基础设施（可独立于 B/A 先落地）
+
 **需要改动的路径**：
 - `dedup.StoreWithDedup()` — 主路径，embedding 使用 Abstract
 - `dedup.insertMemory()` — 设置 Abstract 字段
@@ -234,16 +272,20 @@ func (c *Consolidator) consolidateWithEscalation(ctx context.Context, text strin
 
 ## 五、方案对比
 
-| 维度 | B: 长文本保护 | A-Phase1: Leaf 分组 | A-Phase2: Multi-depth | C: Consolidation 降级 |
-|------|-------------|--------------------|-----------------------|---------------------|
-| **用户价值** | 中（防止性能退化） | 高（洞察质量提升） | 高（渐进压缩） | 低（LLM 故障时） |
-| **技术风险** | 低 | 低 | 中（schema 迁移） | 极低 |
-| **工作量** | ~200 行 | ~150 行 | ~600 行额外 | ~50 行 |
-| **前置依赖** | 无 | connections ✅ | A-Phase1 | 无 |
-| **可独立交付** | 是 | 是 | 是 | 是 |
-| **推荐顺序** | **第 1** | **第 2** | 第 3 | 第 4 |
+| 维度 | D: 摘要模型分离 | B: 长文本保护 | A-Phase1: Leaf 分组 | A-Phase2: Multi-depth | C: Consolidation 降级 |
+|------|-------------|-------------|--------------------|-----------------------|---------------------|
+| **用户价值** | 中（降成本） | 中（防止性能退化） | 高（洞察质量提升） | 高（渐进压缩） | 低（LLM 故障时） |
+| **技术风险** | 极低 | 低 | 低 | 中（schema 迁移） | 极低 |
+| **工作量** | ~80 行 | ~200 行 | ~150 行 | ~600 行额外 | ~50 行 |
+| **前置依赖** | 无 | D（推荐）| connections ✅ | A-Phase1 | 无 |
+| **可独立交付** | 是 | 是 | 是 | 是 | 是 |
+| **推荐顺序** | **第 1** | **第 2** | **第 3** | 第 4 | 第 5 |
 
-> 优先级调整说明（Codex 审查建议）：B 最安全、最独立，先做；A 拆分为两期，Phase 1 验证效果后再决定是否做 Phase 2；C 只在 consolidation 可靠性成为运维痛点时再做。
+> 优先级说明：
+> - **D（摘要模型分离）** 作为基础设施先行，让 B/A-Phase2 可以直接用小模型，不用再改一遍
+> - **B** 在 D 之后做，生成 Abstract 时直接用小模型
+> - **A** 分两期，Phase 1 验证效果后再决定是否做 Phase 2
+> - **C** 只在 consolidation 可靠性成为运维痛点时再做
 
 ---
 
@@ -262,15 +304,16 @@ func (c *Consolidator) consolidateWithEscalation(ctx context.Context, text strin
 
 ## 七、附录：已有基础设施
 
-方案 A/B/C 可以复用的现有组件：
+方案 A/B/C/D 可以复用的现有组件：
 
 ```
 connections 图         → A 的智能分组
 tokutil.EstimateTokens → B 的长度检测
 store.AddConnection    → A 的 consolidation 连接
-llmutil.CallLLM        → C 的多级调用
+llmutil.CallLLM        → C 的多级调用 & D 的路由包装
 dedup.StoreWithDedup   → B 的拦截点
 consolidate.Scheduler  → A 的分层调度
+config.LLMConfig       → D 的 summary 子配置扩展点
 ```
 
 ---

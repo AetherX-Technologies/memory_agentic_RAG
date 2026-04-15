@@ -22,9 +22,9 @@
 
 ### 未触碰的痛点
 
-1. **Consolidation 仍然是"盲"的** — 随机取 50 条，不按语义分组
+1. **Consolidation 仍然是"盲"的** — 取最新 50 条（按时间倒序），不按语义分组
 2. **无长文本保护** — 超长记忆浪费存储和搜索性能
-3. **LLM 调用无降级** — consolidation/冲突检测失败即终止
+3. **Consolidation LLM 无降级** — consolidation 失败即终止（冲突检测已有 fallback）
 
 ---
 
@@ -35,7 +35,7 @@
 当前 `consolidate.Consolidate()` 的行为：
 
 ```
-ListUnconsolidated(50)  →  取最老的 50 条（不管是否相关）
+ListUnconsolidated(50)  →  取最新的 50 条（按时间倒序，不按语义分组）
         ↓
     全部格式化为文本
         ↓
@@ -45,7 +45,7 @@ ListUnconsolidated(50)  →  取最老的 50 条（不管是否相关）
 ```
 
 **缺陷**：
-- 50 条不相关记忆混在一起，LLM 很难发现有意义的模式
+- 最多 50 条不相关记忆混在一起，LLM 很难发现有意义的模式
 - 一次调用 token 量大（50 条 × 平均 30 字 = 1500 字 + prompt），成本高
 - 输出质量低——强迫 LLM 在不相关事物间找关联
 
@@ -81,23 +81,41 @@ Step 6: 当 depth-0 consolidation 数量 ≥ 5，condensation → depth-1
 
 **前置条件**：connections 已就位 ✅
 
-### 2.4 风险
+### 2.4 建议分阶段实施
+
+**Phase 1（Leaf-only 语义分组）**：
+- 仅改 `Consolidate()` 的分组策略：用 connections 图 BFS 取 5-10 条相关记忆
+- 不加 depth 字段，不做 condensation
+- ~150 行改动
+
+**Phase 2（Multi-depth condensation）**：
+- **根本问题**：`consolidations` 目前不是 `Memory` 节点，recursive condensation 需要把 consolidation 作为可再处理的节点，这是**数据模型重构**，不是加个 depth 列那么简单
+- 两种路径选择：
+  - 路径 A：把 consolidation 合并到 `memories` 表（用 `node_type="consolidation"` + `depth` 字段）— 改动大但概念统一
+  - 路径 B：保持独立表但新增 `parent_consolidation_id` + `depth` + 专用 condensation API — 改动小但逻辑分叉
+- 需要 "list leaf consolidations eligible for condensation" 查询
+- 需要 `ListConsolidations` 的 recall 展示区分 depth
+- ~600 行改动（含 schema 迁移、新 API、测试），**不是原估的 300 行**
+
+### 2.5 风险
 
 | 风险 | 概率 | 缓解 |
 |------|------|------|
-| connections 不足导致分组太小 | 中 | 允许"孤立组"（无连接的记忆单独成组） |
-| 多级 LLM 调用成本 | 低 | leaf 用 mini 模型，condensation 用强模型 |
-| depth 表结构迁移 | 低 | ALTER TABLE ADD COLUMN，兼容旧数据 |
+| connections 图稀疏（dedup 默认最多 3 条/次，JSON 非关系表） | 中 | 允许"孤立组"；Phase 1 先验证效果 |
+| `ListUnconsolidated()` 不返回 connections 字段 | 高 | Phase 1 需额外 `Get()` 调用或新增 store 查询 |
+| `consolidated` 是一次性 flag — 后加的 connections 无法让已聚合记忆重新分组 | 中 | 可考虑"周期性重置"或 "connection 变更触发 re-consolidation" |
+| consolidation 不是 Memory 节点，无法被再处理 | 高（Phase 2） | 需要新 API 或改数据模型 |
+| recall 混合展示不同 depth 的 insight | 低 | 按 depth 排序展示 |
 
-### 2.5 预期收益
+### 2.6 预期收益
 
-- Consolidation 质量大幅提升（同主题小组 vs 随机大批）
-- 渐进式知识压缩（depth 0 → 1 → 2，信息密度递增）
-- 更好的洞察（"在过去 10 次对话中，你一直偏好..."）
+- Phase 1：consolidation 质量大幅提升（同主题小组 vs 混杂大批）
+- Phase 2：渐进式知识压缩（depth 0 → 1 → 2，信息密度递增）
 
-### 2.6 工作量估算
+### 2.7 工作量估算
 
-核心改动 ~300 行 Go + schema 迁移 + 测试。
+- Phase 1：~150 行 Go + 测试
+- Phase 2：~600 行额外 + schema 重构 + API 扩展 + 测试（需先决策路径 A/B）
 
 ---
 
@@ -106,9 +124,11 @@ Step 6: 当 depth-0 consolidation 数量 ≥ 5，condensation → depth-1
 ### 3.1 问题
 
 当前系统允许任意长度的记忆文本存入。如果用户存入一段 5000 字的笔记：
-- 向量化只取前 512 tokens（ONNX 限制），后面的内容不被搜索
-- FTS5 索引全文，但 BM25 对长文档有 length normalization 惩罚
-- 格式化输出时浪费 token 预算
+- 向量化只取前 512 tokens（本地 ONNX 限制），后面的内容不被向量搜索覆盖
+- 格式化输出时浪费大量 token 预算（一条长记忆可能占满整个 max_tokens）
+- 嵌入质量下降（长文本的 embedding 信号被稀释）
+
+**方案 B 解决的是嵌入精度和展示效率**，不是 FTS 索引或存储体积（全文保留用于关键词搜索）。
 
 ### 3.2 LCM 的做法
 
@@ -119,29 +139,49 @@ Step 6: 当 depth-0 consolidation 数量 ≥ 5，condensation → depth-1
 
 ### 3.3 移植方案
 
-**在 `StoreWithDedup` 中加入长度检查**：
+**保留 Text 不变，利用 Abstract 字段做展示和嵌入**（Codex 审查建议）：
 
 ```
 if estimateTokens(content) > MaxMemoryTokens (默认 500):
     1. 生成摘要（LLM 或截断前 200 tokens）
-    2. 存储摘要为 Memory.Text
-    3. 原始全文存入 Memory.Metadata（JSON）
-    4. Memory.Abstract = 摘要
-    5. 向量化使用摘要（保证 512 token 内）
+    2. Memory.Text = 原始全文（不变，FTS 仍索引全文）
+    3. Memory.Abstract = 生成的摘要
+    4. 向量化使用 Abstract（保证 512 token 内）
+    5. formatMemoryLine 优先展示 Abstract（如有）
 ```
 
-**不需要新表**——利用现有的 `abstract` 和 `metadata` 字段。
+**不需要新表**——`abstract` 字段已存在于 OpenViking 层次结构中（用于 L0 摘要），此方案新增 AI 记忆系统对它的使用。
+
+**重要副作用**：一旦 embedding 从 Text 切换为 Abstract，下游行为全部改变：
+- Dedup 阈值校准数据失效（需重新校准，因为 "Abstract vs Abstract" 的相似度分布和 "Text vs Text" 不同）
+- 冲突检测的 cosine 值偏移，conflict band 可能需要调整
+- Connection 建立基于 Abstract 的相似度而非原文
+- **建议**：B 方案上线后触发一次自动重校准
+
+**需要改动的路径**：
+- `dedup.StoreWithDedup()` — 主路径，embedding 使用 Abstract
+- `dedup.insertMemory()` — 设置 Abstract 字段
+- `extractor.ExtractedMemory` — 新增 Abstract 字段
+- `Service.Store()` 直接 insert fallback
+- `Service.Update()` 内容变更路径
+- `Service.autoStore()` 自动捕获路径
+- `Service.Import()` 批量恢复
+- `memservice/format.go` — `formatMemoryLine()` 优先用 Abstract 展示
+- `memservice/service.go` — Recall 的关联记忆渲染路径（`cm.Text` → `cm.Abstract`）
+- `mcp/format.go` — MCP 独立的格式化路径（同样需要优先用 Abstract）
 
 ### 3.4 风险
 
 | 风险 | 概率 | 缓解 |
 |------|------|------|
-| 摘要丢失关键信息 | 中 | 保留原文在 metadata，recall 可选展开 |
+| 摘要丢失关键信息 | 中 | Text 全文保留，recall 可展开 |
 | LLM 摘要成本 | 低 | 只对 >500 tokens 触发 |
+| 远程 API embedder 无 512 限制 | 低 | 仍受益于更短的展示文本 |
+| Legacy REST 路径（POST/PUT /api/memories）绕过拦截 | 低 | legacy 路径是向后兼容，主流程走 MCP/Tool API |
 
 ### 3.5 工作量估算
 
-~100 行改动（dedup.go + service.go）。
+~200 行改动（dedup.go + extractor.go + service.go + format.go，需覆盖全部 store 路径）。
 
 ---
 
@@ -149,9 +189,11 @@ if estimateTokens(content) > MaxMemoryTokens (默认 500):
 
 ### 4.1 问题
 
-当前 LLM 调用失败（超时、API 错误）直接返回 error：
-- `consolidate.Consolidate()` → 整个 consolidation 失败
-- `dedup.detectConflict()` → 跳过冲突检测，可能存入矛盾记忆
+当前 LLM 调用失败时行为不一致：
+- `consolidate.Consolidate()` → 整个 consolidation 失败，返回 error
+- `dedup.detectConflict()` → 已有降级（LLM 失败时返回 false，不阻塞存储）
+
+**真正的问题是 consolidation 没有降级**——LLM 不可用时聚合完全停止。
 
 ### 4.2 LCM 的做法
 
@@ -192,14 +234,16 @@ func (c *Consolidator) consolidateWithEscalation(ctx context.Context, text strin
 
 ## 五、方案对比
 
-| 维度 | A: DAG Consolidation | B: 长文本拦截 | C: LLM 降级 |
-|------|---------------------|-------------|------------|
-| **用户价值** | 高（洞察质量提升） | 中（防止性能退化） | 低（仅在 LLM 故障时） |
-| **技术风险** | 中（schema 迁移） | 低 | 极低 |
-| **工作量** | ~300 行 | ~100 行 | ~50 行 |
-| **前置依赖** | connections ✅ | 无 | 无 |
-| **可独立交付** | 是 | 是 | 是 |
-| **推荐顺序** | 第 1 | 第 2 | 第 3 |
+| 维度 | B: 长文本保护 | A-Phase1: Leaf 分组 | A-Phase2: Multi-depth | C: Consolidation 降级 |
+|------|-------------|--------------------|-----------------------|---------------------|
+| **用户价值** | 中（防止性能退化） | 高（洞察质量提升） | 高（渐进压缩） | 低（LLM 故障时） |
+| **技术风险** | 低 | 低 | 中（schema 迁移） | 极低 |
+| **工作量** | ~200 行 | ~150 行 | ~600 行额外 | ~50 行 |
+| **前置依赖** | 无 | connections ✅ | A-Phase1 | 无 |
+| **可独立交付** | 是 | 是 | 是 | 是 |
+| **推荐顺序** | **第 1** | **第 2** | 第 3 | 第 4 |
+
+> 优先级调整说明（Codex 审查建议）：B 最安全、最独立，先做；A 拆分为两期，Phase 1 验证效果后再决定是否做 Phase 2；C 只在 consolidation 可靠性成为运维痛点时再做。
 
 ---
 
@@ -212,7 +256,7 @@ func (c *Consolidator) consolidateWithEscalation(ctx context.Context, text strin
 | 主动记忆浮现（方案 8） | 每个 turn 注入记忆绕过 ShouldRetrieve 门控，会注入无关上下文，浪费 token 且降低 LLM 性能 |
 | 统一 DAG 大合并（方案 13） | 多月重写，风险/回报比灾难级。两个系统松耦合是特性不是缺陷 |
 | 自我改进反馈闭环（方案 12） | 测量噪声当信号反馈，会导致提取质量回归 |
-| 记忆感知摘要（方案 6/9） | 循环依赖，解决的问题（事实重复出现两次）对 LLM 几乎无害 |
+| 记忆感知摘要 — 完整版（方案 6/9） | 完整版需循环依赖，解决的问题对 LLM 几乎无害。但**窄版本**（用 Abstract/Overview 字段做长记忆的展示/嵌入）已纳入方案 B |
 
 ---
 

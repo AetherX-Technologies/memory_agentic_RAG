@@ -36,6 +36,13 @@ func Load() (*App, error) {
 		dbPath = "memory.db"
 	}
 
+	// Ensure DB parent directory exists (clean-checkout startup with nested paths like data/memories.db)
+	if dbPath != ":memory:" {
+		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+			_ = os.MkdirAll(dir, 0755)
+		}
+	}
+
 	storeCfg := cfg.ToStoreConfig()
 	storeCfg.DBPath = dbPath
 

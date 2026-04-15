@@ -11,6 +11,8 @@ import (
 	"github.com/yourusername/hybridmem-rag/internal/consolidate"
 	"github.com/yourusername/hybridmem-rag/internal/dedup"
 	"github.com/yourusername/hybridmem-rag/internal/embedder"
+	"github.com/yourusername/hybridmem-rag/internal/extractor"
+	"github.com/yourusername/hybridmem-rag/internal/generator"
 	"github.com/yourusername/hybridmem-rag/internal/llmutil"
 	"github.com/yourusername/hybridmem-rag/internal/store"
 	"github.com/yourusername/hybridmem-rag/internal/trigger"
@@ -28,6 +30,11 @@ type App struct {
 	// SummaryLLM is for summarization, structured extraction (falls back to MainLLM if not configured).
 	MainLLM    llmutil.ResolvedLLMConfig
 	SummaryLLM llmutil.ResolvedLLMConfig
+
+	// Lightweight LLM-driven components configured with SummaryLLM tier.
+	// Both are nil if SummaryLLM has no APIKey (no fallback rule-based behavior).
+	Generator *generator.Generator
+	Extractor *extractor.Extractor
 
 	calibration *dedup.CalibrationResult
 	closeFuncs  []func() error
@@ -192,6 +199,32 @@ func Load() (*App, error) {
 			LLMTimeout:  consolidationTimeout,
 			MaxMemories: 50,
 		})
+	}
+
+	// Lightweight LLM components use SummaryLLM tier (smaller/cheaper model).
+	// If summary not configured, falls back to mainLLM via ResolveLLMConfig.
+	if summaryLLM.APIKey != "" {
+		genCfg := generator.DefaultConfig()
+		genCfg.APIKey = summaryLLM.APIKey
+		genCfg.Model = summaryLLM.Model
+		genCfg.Endpoint = summaryLLM.Endpoint
+		if summaryLLM.Timeout > 0 {
+			genCfg.Timeout = summaryLLM.Timeout
+		}
+		if gen, err := generator.New(genCfg); err == nil {
+			app.Generator = gen
+		} else {
+			fmt.Fprintf(os.Stderr, "[bootstrap] generator init failed: %v\n", err)
+		}
+
+		extCfg := extractor.DefaultConfig()
+		extCfg.APIKey = summaryLLM.APIKey
+		extCfg.Model = summaryLLM.Model
+		extCfg.Endpoint = summaryLLM.Endpoint
+		if summaryLLM.Timeout > 0 {
+			extCfg.Timeout = summaryLLM.Timeout
+		}
+		app.Extractor = extractor.New(extCfg)
 	}
 
 	return app, nil

@@ -51,6 +51,18 @@ func main() {
 	}
 	pass("bootstrap.Load 成功: Store + Embedder + FastText")
 
+	// Verify D2: Generator and Extractor configured with summary tier
+	if app.Generator != nil {
+		pass(fmt.Sprintf("D2: Generator initialized with summary LLM (model=%s)", app.SummaryLLM.Model))
+	} else {
+		fmt.Println("   ⚠️  Generator nil (no LLM configured)")
+	}
+	if app.Extractor != nil {
+		pass(fmt.Sprintf("D2: Extractor initialized with summary LLM (model=%s)", app.SummaryLLM.Model))
+	} else {
+		fmt.Println("   ⚠️  Extractor nil (no LLM configured)")
+	}
+
 	dd := dedup.New(app.Store, app.Embedder, dedup.DefaultConfig())
 	mcpSrv := mcp.New(app.Store, app.Embedder, mcp.DefaultConfig(), app.Consolidator)
 

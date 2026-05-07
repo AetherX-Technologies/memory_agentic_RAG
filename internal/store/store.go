@@ -18,6 +18,15 @@ func init() {
 	sql.Register("sqlite3_with_extensions",
 		&sqlite3.SQLiteDriver{
 			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				// codex round 5 high: 把 FK PRAGMA 放进 ConnectHook，确保
+				// 连接池里**每个**新连接都启用 FK。原方案靠 db.Exec("PRAGMA
+				// foreign_keys = ON") 只覆盖当次借到的连接，连接池后续新开
+				// 的连接 FK 仍是关的，CASCADE 不可靠。这里在 hook 里跑一次
+				// PRAGMA，sql.DB 每开一个新连接都会过这个 hook。
+				if _, err := conn.Exec("PRAGMA foreign_keys = ON", nil); err != nil {
+					return fmt.Errorf("enable foreign_keys: %w", err)
+				}
+
 				var extName string
 				switch runtime.GOOS {
 				case "darwin":
@@ -128,11 +137,14 @@ type sqliteStore struct {
 
 // New 创建新的存储实例
 func New(config Config) (Store, error) {
+	// codex round 5 high: DSN 同时带 _foreign_keys=1（mattn 1.14.34 识别）
+	// 兜底；真正的可靠性来自 ConnectHook 里每连接 PRAGMA。原 _pragma=
+	// foreign_keys(1) 在该版本 mattn 里**不被识别**，被静默忽略。
 	dbPath := config.DBPath
 	if dbPath == ":memory:" {
-		dbPath += "?_load_extension=1"
+		dbPath += "?_load_extension=1&_foreign_keys=1"
 	} else {
-		dbPath += "?_pragma=foreign_keys(1)&_load_extension=1"
+		dbPath += "?_load_extension=1&_foreign_keys=1"
 	}
 	db, err := sql.Open("sqlite3_with_extensions", dbPath)
 	if err != nil {
@@ -151,15 +163,6 @@ func New(config Config) (Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("failed to enable WAL: %w", err)
 		}
-	}
-	// codex round 4 low: 显式 PRAGMA 兜底。原 DSN `_pragma=foreign_keys(1)`
-	// 是 mattn/go-sqlite3 的合法写法，但只在新建连接时执行，连接池里轮换
-	// 出来的连接如果走了不同 ConnectHook 路径不一定都生效。每次 Open 后再
-	// 显式 PRAGMA 一次，确保 memory_sweep_judgements / memory_supersessions
-	// 等表的 ON DELETE CASCADE 在 hard delete / RunCleanup 时一定触发。
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to enable foreign_keys: %w", err)
 	}
 
 	// 初始化表结构

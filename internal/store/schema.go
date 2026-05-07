@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 )
 
 const (
@@ -266,5 +267,69 @@ func migrateMemorySystem(db *sql.DB) error {
 		}
 	}
 
+	// codex round 5 low: round-3 已经创建过 memory_sweep_judgements 但没
+	// CHECK 约束的老库，CREATE TABLE IF NOT EXISTS 不会升级 schema。这里
+	// 用 sqlite_master.sql 探测；缺 CHECK 时重建表（合法旧数据迁过去，
+	// 非法 state 的行被丢弃——读侧白名单已经在过滤这些行了）。
+	if err := upgradeSweepJudgementsCheck(db); err != nil {
+		return fmt.Errorf("failed to upgrade memory_sweep_judgements CHECK: %w", err)
+	}
+
 	return nil
+}
+
+// upgradeSweepJudgementsCheck rebuilds memory_sweep_judgements when the existing
+// table predates the round-5 CHECK constraint (round-3 created it without).
+// No-op when the table either doesn't exist (fresh install — CREATE TABLE IF
+// NOT EXISTS above already used the correct schema) or already has CHECK.
+func upgradeSweepJudgementsCheck(db *sql.DB) error {
+	var sqlText sql.NullString
+	err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_sweep_judgements'`,
+	).Scan(&sqlText)
+	if err == sql.ErrNoRows {
+		return nil // never created — CREATE TABLE IF NOT EXISTS above will run on next call
+	}
+	if err != nil {
+		return fmt.Errorf("read sqlite_master: %w", err)
+	}
+	if !sqlText.Valid {
+		return nil
+	}
+	if strings.Contains(strings.ToUpper(sqlText.String), "CHECK") {
+		return nil // already has CHECK
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`CREATE TABLE memory_sweep_judgements_new (
+		old_id TEXT NOT NULL,
+		new_id TEXT NOT NULL,
+		state TEXT NOT NULL CHECK (state IN ('same','new_less_specific','unrelated')),
+		judged_at INTEGER NOT NULL,
+		PRIMARY KEY (old_id, new_id),
+		FOREIGN KEY (old_id) REFERENCES memories(id) ON DELETE CASCADE,
+		FOREIGN KEY (new_id) REFERENCES memories(id) ON DELETE CASCADE
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO memory_sweep_judgements_new
+		SELECT old_id, new_id, state, judged_at FROM memory_sweep_judgements
+		WHERE state IN ('same','new_less_specific','unrelated')`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE memory_sweep_judgements`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`ALTER TABLE memory_sweep_judgements_new RENAME TO memory_sweep_judgements`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sweep_judgements_old ON memory_sweep_judgements(old_id)`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

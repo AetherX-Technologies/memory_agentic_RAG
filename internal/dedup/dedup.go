@@ -283,20 +283,14 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 		}
 	}
 
-	// Filter to same memory_type for semantic dedup
-	var sametype []store.SearchResult
-	for _, c := range candidates {
-		if c.Entry.MemoryType == mem.MemoryType {
-			sametype = append(sametype, c)
-		}
-	}
-
-	// codex round 4 medium：tag overlap 过滤。
-	// 只在 caller 显式带 Tags 时启用（warmFriend v3.2 fact path）；其他写入
-	// 路径不带 tag → 行为完全不变。和 service.Recall 的 tag 过滤同语义：
-	// 候选必须至少和 incoming 共享一个 tag 才进入语义 dedup。
-	// 走 BatchGetTags 一次取完，避免 N+1。
-	if len(mem.Tags) > 0 && len(sametype) > 0 {
+	// codex round 5 medium：把 tag overlap 过滤推到 candidates 层并应用到
+	// 连接构建。原方案只过滤 sametype，跨 subject 候选仍会进 connections，
+	// 污染后续 recall。同时把"BatchGetTags 失败" fail-safe 化：
+	// tagged incoming 在无法核验 tag 时跳过语义 dedup（只信 content_hash），
+	// 也跳过 connections，避免误合 / 误关联。
+	skipSemanticDedup := false
+	skipConnectionBuild := false
+	if len(mem.Tags) > 0 && len(candidates) > 0 {
 		want := make(map[string]struct{}, len(mem.Tags))
 		for _, t := range mem.Tags {
 			t = strings.TrimSpace(t)
@@ -305,32 +299,48 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 			}
 		}
 		if len(want) > 0 {
-			ids := make([]string, 0, len(sametype))
-			for _, c := range sametype {
+			ids := make([]string, 0, len(candidates))
+			for _, c := range candidates {
 				ids = append(ids, c.Entry.ID)
 			}
-			tagsByID, _ := d.store.BatchGetTags(ids)
-			kept := sametype[:0]
-			for _, c := range sametype {
-				ts := tagsByID[c.Entry.ID]
-				// 旧 fact 没 tag → 保守视为可比（避免 v3.2 之前写入的全
-				// 漏掉 dedup）；有 tag 但无重叠 → 跨 subject 噪声，剔除。
-				if len(ts) == 0 {
-					kept = append(kept, c)
-					continue
-				}
-				overlap := false
-				for _, t := range ts {
-					if _, ok := want[t]; ok {
-						overlap = true
-						break
+			tagsByID, tagErr := d.store.BatchGetTags(ids)
+			if tagErr != nil {
+				fmt.Fprintf(os.Stderr, "[dedup] BatchGetTags failed for tagged incoming (skipping semantic dedup + connections): %v\n", tagErr)
+				skipSemanticDedup = true
+				skipConnectionBuild = true
+			} else {
+				kept := candidates[:0]
+				for _, c := range candidates {
+					ts := tagsByID[c.Entry.ID]
+					// 旧 fact 没 tag → 保守视为可比（避免 v3.2 之前写入的全
+					// 漏掉 dedup）；有 tag 但无重叠 → 跨 subject 噪声，剔除。
+					if len(ts) == 0 {
+						kept = append(kept, c)
+						continue
+					}
+					overlap := false
+					for _, t := range ts {
+						if _, ok := want[t]; ok {
+							overlap = true
+							break
+						}
+					}
+					if overlap {
+						kept = append(kept, c)
 					}
 				}
-				if overlap {
-					kept = append(kept, c)
-				}
+				candidates = kept
 			}
-			sametype = kept
+		}
+	}
+
+	// Filter to same memory_type for semantic dedup（基于 tag 过滤后的 candidates）
+	var sametype []store.SearchResult
+	if !skipSemanticDedup {
+		for _, c := range candidates {
+			if c.Entry.MemoryType == mem.MemoryType {
+				sametype = append(sametype, c)
+			}
 		}
 	}
 
@@ -419,7 +429,11 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 	}
 
 	// Step 5: Build connections to related memories
-	d.buildConnectionsFiltered(id, candidates, conflictThresh, nil)
+	// codex round 5 medium：tag 过滤后的 candidates 用于 connections；
+	// BatchGetTags 失败时 skipConnectionBuild=true，避免污染 recall。
+	if !skipConnectionBuild {
+		d.buildConnectionsFiltered(id, candidates, conflictThresh, nil)
+	}
 
 	return Result{
 		Action: "stored",

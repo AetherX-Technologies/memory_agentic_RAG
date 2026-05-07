@@ -299,8 +299,14 @@ func upgradeSweepJudgementsCheck(db *sql.DB) error {
 	if !sqlText.Valid {
 		return nil
 	}
-	if strings.Contains(strings.ToUpper(sqlText.String), "CHECK") {
-		return nil // already has CHECK
+	// codex v3.3 round 2 critical: 老的判断 "包含 CHECK 就跳过" 让 v3.2 round-3
+	// 已建过 3 态 CHECK 的库不会升级到 5 态，complementary_merged / merge_failed
+	// 写入会被 CHECK 拒。改成检测两个新增 state 是否都已存在 schema 里——只要
+	// 缺任一都重建。
+	upper := strings.ToUpper(sqlText.String)
+	if strings.Contains(upper, "COMPLEMENTARY_MERGED") &&
+		strings.Contains(upper, "MERGE_FAILED") {
+		return nil // 已在 5 态 schema
 	}
 
 	tx, err := db.Begin()

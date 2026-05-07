@@ -242,6 +242,23 @@ func migrateMemorySystem(db *sql.DB) error {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_consolidation_created ON consolidations(created_at DESC)`,
+		// warmFriend v3.2 fact-fusion §C round 3 fix：
+		// sweep 把已经判过但不建链的 (old, new) pair 记下来，避免反复重判同一批；
+		// 只持久化 LLM 稳定结论（same / new_less_specific / unrelated）。
+		// 如果 fact 被删 → CASCADE 自动清理；fact 被改写 → 不主动 invalidate
+		// （sweep 重抽时即便结论变了，也只是漏掉一次融合机会，不伤数据）。
+		// codex round 4 low：state 列加 CHECK 白名单，挡住外部/旧 bug 写入
+		// "error"/"unknown"/任意值导致后续 sweep 永久跳过该 pair。
+		`CREATE TABLE IF NOT EXISTS memory_sweep_judgements (
+			old_id TEXT NOT NULL,
+			new_id TEXT NOT NULL,
+			state TEXT NOT NULL CHECK (state IN ('same','new_less_specific','unrelated')),
+			judged_at INTEGER NOT NULL,
+			PRIMARY KEY (old_id, new_id),
+			FOREIGN KEY (old_id) REFERENCES memories(id) ON DELETE CASCADE,
+			FOREIGN KEY (new_id) REFERENCES memories(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sweep_judgements_old ON memory_sweep_judgements(old_id)`,
 	}
 	for _, ddl := range tables {
 		if _, err := db.Exec(ddl); err != nil {

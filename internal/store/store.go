@@ -102,6 +102,9 @@ type Store interface {
 	RunCleanup(now int64) error
 	SetTags(memoryID string, tags []string) error
 	GetTags(memoryID string) ([]string, error)
+	// BatchGetTags returns tags for many memory IDs in a single query.
+	// IDs without tags appear in the map with an empty/nil slice.
+	BatchGetTags(memoryIDs []string) (map[string][]string, error)
 	GetMemoryIDsByTag(tag string) ([]string, error)
 	// Phase G: Consolidation
 	ListUnconsolidated(limit int) ([]*Memory, error)
@@ -148,6 +151,15 @@ func New(config Config) (Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("failed to enable WAL: %w", err)
 		}
+	}
+	// codex round 4 low: 显式 PRAGMA 兜底。原 DSN `_pragma=foreign_keys(1)`
+	// 是 mattn/go-sqlite3 的合法写法，但只在新建连接时执行，连接池里轮换
+	// 出来的连接如果走了不同 ConnectHook 路径不一定都生效。每次 Open 后再
+	// 显式 PRAGMA 一次，确保 memory_sweep_judgements / memory_supersessions
+	// 等表的 ON DELETE CASCADE 在 hard delete / RunCleanup 时一定触发。
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable foreign_keys: %w", err)
 	}
 
 	// 初始化表结构
@@ -670,6 +682,56 @@ func (s *sqliteStore) GetTags(memoryID string) ([]string, error) {
 		tags = append(tags, tag)
 	}
 	return tags, rows.Err()
+}
+
+// batchGetTagsChunkSize keeps each query well under SQLite's default
+// SQLITE_LIMIT_VARIABLE_NUMBER (999 on older builds, 32766 on newer).
+// 500 leaves comfortable headroom and stays cache-friendly.
+const batchGetTagsChunkSize = 500
+
+// BatchGetTags fetches tags for many memory IDs.
+// Returns a map keyed by memory_id; IDs without tags are absent from the map
+// (caller treats lookup miss as "no tags"). Internally chunks the IN(...) list
+// to stay below SQLite's variable limit even for very large input lists
+// (codex round 2 low: BatchGetTags variable limit hardening).
+func (s *sqliteStore) BatchGetTags(memoryIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(memoryIDs))
+	if len(memoryIDs) == 0 {
+		return out, nil
+	}
+	for start := 0; start < len(memoryIDs); start += batchGetTagsChunkSize {
+		end := start + batchGetTagsChunkSize
+		if end > len(memoryIDs) {
+			end = len(memoryIDs)
+		}
+		chunk := memoryIDs[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := `SELECT memory_id, tag FROM memory_tags WHERE memory_id IN (` +
+			strings.Join(placeholders, ",") + `)`
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var mid, tag string
+			if err := rows.Scan(&mid, &tag); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[mid] = append(out[mid], tag)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // GetMemoryIDsByTag returns memory IDs that have the given tag.

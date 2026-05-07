@@ -53,6 +53,7 @@ type ExtractedMemory struct {
 	SourceConv  string // Conversation ID
 	Scope       string // "global" by default, preserved on update
 	Abstract    string // Optional pre-computed summary (Scheme B). If empty and Content is long, dedup will auto-generate via abstractor.
+	Metadata    string // Opaque JSON string persisted to memories.metadata as-is (used by warmFriend v3.2 to attach episode image_ids + assistant_response).
 }
 
 // Message represents a single message in a conversation.

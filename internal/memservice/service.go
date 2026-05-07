@@ -62,6 +62,7 @@ type StoreRequest struct {
 	Type       string   `json:"type"`
 	Importance float64  `json:"importance"`
 	Tags       []string `json:"tags"`
+	Metadata   string   `json:"metadata,omitempty"` // JSON string; opaque to server, persisted as-is
 }
 
 type StoreResponse struct {
@@ -77,6 +78,7 @@ type RecallRequest struct {
 	MinImportance float64  `json:"min_importance"`
 	MaxTokens     int      `json:"max_tokens"`
 	SourceConv    string   `json:"source_conv,omitempty"` // filter by conversation ID
+	Tags          []string `json:"tags,omitempty"`        // filter: keep only candidates with ≥1 overlapping tag
 }
 
 type RecallOptions struct {
@@ -315,6 +317,13 @@ func (s *Service) Store(_ context.Context, req StoreRequest) (*StoreResponse, er
 			Importance:  req.Importance,
 			Confidence:  0.9,
 			ContentHash: contentHash,
+			Metadata:    req.Metadata, // warmFriend v3.2: episode image_ids + assistant_response
+			// codex round 4 medium：把 tags 带进 dedup，让 StoreWithDedup 在
+			// 候选过滤阶段把跨 subject 的高相似 fact 排除掉。Python L2/L3 已经
+			// 判过 unrelated/fail-open 后，Go 这边的语义 dedup 不应再把它们
+			// 错认为 duplicate / supersession（典型："用户养了猫" vs "用户在西安"
+			// 因为 embedding 邻近被 Go 错合）。
+			Tags: req.Tags,
 		})
 		if err != nil {
 			return nil, classifyStoreError("store memory", err)
@@ -325,7 +334,16 @@ func (s *Service) Store(_ context.Context, req StoreRequest) (*StoreResponse, er
 			targetID = result.OldID
 		}
 		if targetID != "" && len(req.Tags) > 0 {
-			_ = s.store.SetTags(targetID, req.Tags)
+			// warmFriend v3.2 fix: dedup 命中 duplicate 时合并旧 tag 而不是覆盖
+			// （codex round 1 medium）。新写入往往只带"主要 subject"，覆盖会
+			// 抹掉历史更细的 tag。新 memory 路径（result.ID 非空）也走 merge
+			// 是无害的，因为 store 是 fresh insert 没有旧 tag。
+			//
+			// codex round 2 low：GetTags 失败时 ok=false，跳过 SetTags 防止
+			// "瞬时读失败 + 写成功" 静默吃掉旧 tag。
+			if merged, ok := mergeTags(s.store, targetID, req.Tags); ok {
+				_ = s.store.SetTags(targetID, merged)
+			}
 		}
 		return &StoreResponse{
 			ID:     result.ID,
@@ -350,6 +368,7 @@ func (s *Service) Store(_ context.Context, req StoreRequest) (*StoreResponse, er
 		MemoryType:  req.Type,
 		Confidence:  0.9,
 		ContentHash: contentHash,
+		Metadata:    req.Metadata,
 		Vector:      vec,
 	}
 
@@ -418,12 +437,39 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 	if req.SourceConv != "" {
 		searchLimit = req.Limit * 10 // widen pool when filtering by conversation
 	}
+	tagFilter := make(map[string]struct{}, len(req.Tags))
+	for _, t := range req.Tags {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			tagFilter[t] = struct{}{}
+		}
+	}
+	// warmFriend v3.2 fix: tag 过滤是后置 post-filter，如果同 tag 候选挤不
+	// 进 top-K（默认 limit*3=15），会被错误丢弃。当 caller 显式带 tags 时
+	// 把搜索池放宽到 100，跟 conv-mode 一样。代价：search 多读一些行；
+	// 收益：subject 召回不再因为排序压力假阴性。
+	if len(tagFilter) > 0 && searchLimit < 100 {
+		searchLimit = 100
+	}
 	if searchLimit > 100 {
 		searchLimit = 100 // respect hierarchical search limit
 	}
 	results, err := s.store.Search(queryVec, queryText, opts.CurrentPath, searchLimit, opts.Scopes)
 	if err != nil {
 		return nil, &ToolError{Code: ErrorCodeInternal, Message: "search failed", Err: err}
+	}
+
+	// warmFriend v3.2 fix: 把 GetTags 从 N+1 收成一次批查。
+	// 仅在有 tagFilter 时取，避免给非 tag-filter 路径加开销。
+	candTagsByID := map[string][]string{}
+	if len(tagFilter) > 0 && len(results) > 0 {
+		ids := make([]string, 0, len(results))
+		for _, r := range results {
+			ids = append(ids, r.Entry.ID)
+		}
+		if m, err := s.store.BatchGetTags(ids); err == nil {
+			candTagsByID = m
+		}
 	}
 
 	filtered := make([]store.SearchResult, 0, len(results))
@@ -439,6 +485,11 @@ func (s *Service) Recall(_ context.Context, req RecallRequest, opts RecallOption
 		}
 		if isNoise, _ := trigger.IsNoise(r.Entry.Text); isNoise {
 			continue
+		}
+		if len(tagFilter) > 0 {
+			if !hasTagOverlap(candTagsByID[r.Entry.ID], tagFilter) {
+				continue
+			}
 		}
 		filtered = append(filtered, r)
 	}
@@ -1055,6 +1106,62 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func hasTagOverlap(candTags []string, filter map[string]struct{}) bool {
+	for _, t := range candTags {
+		if _, ok := filter[t]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanTagList trims and de-duplicates a tag slice in input order.
+func cleanTagList(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, t := range in {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out
+}
+
+// mergeTags returns (mergedTags, ok). When ok is false the caller must NOT
+// SetTags — because SetTags first DELETEs all existing tags, a transient
+// GetTags failure followed by a successful SetTags would silently wipe the
+// real tag set (codex round 2 low). Order: existing first (preserved),
+// then any cleaned incoming not already present.
+func mergeTags(s store.Store, memoryID string, incoming []string) ([]string, bool) {
+	cleaned := cleanTagList(incoming)
+	existing, err := s.GetTags(memoryID)
+	if err != nil {
+		return cleaned, false
+	}
+	if len(existing) == 0 {
+		return cleaned, true
+	}
+	seen := make(map[string]struct{}, len(existing)+len(cleaned))
+	for _, t := range existing {
+		seen[t] = struct{}{}
+	}
+	out := append([]string(nil), existing...)
+	for _, t := range cleaned {
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out, true
 }
 
 func min(a, b int) int {

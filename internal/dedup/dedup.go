@@ -291,6 +291,49 @@ func (d *Deduplicator) StoreWithDedup(ctx context.Context, mem extractor.Extract
 		}
 	}
 
+	// codex round 4 medium：tag overlap 过滤。
+	// 只在 caller 显式带 Tags 时启用（warmFriend v3.2 fact path）；其他写入
+	// 路径不带 tag → 行为完全不变。和 service.Recall 的 tag 过滤同语义：
+	// 候选必须至少和 incoming 共享一个 tag 才进入语义 dedup。
+	// 走 BatchGetTags 一次取完，避免 N+1。
+	if len(mem.Tags) > 0 && len(sametype) > 0 {
+		want := make(map[string]struct{}, len(mem.Tags))
+		for _, t := range mem.Tags {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				want[t] = struct{}{}
+			}
+		}
+		if len(want) > 0 {
+			ids := make([]string, 0, len(sametype))
+			for _, c := range sametype {
+				ids = append(ids, c.Entry.ID)
+			}
+			tagsByID, _ := d.store.BatchGetTags(ids)
+			kept := sametype[:0]
+			for _, c := range sametype {
+				ts := tagsByID[c.Entry.ID]
+				// 旧 fact 没 tag → 保守视为可比（避免 v3.2 之前写入的全
+				// 漏掉 dedup）；有 tag 但无重叠 → 跨 subject 噪声，剔除。
+				if len(ts) == 0 {
+					kept = append(kept, c)
+					continue
+				}
+				overlap := false
+				for _, t := range ts {
+					if _, ok := want[t]; ok {
+						overlap = true
+						break
+					}
+				}
+				if overlap {
+					kept = append(kept, c)
+				}
+			}
+			sametype = kept
+		}
+	}
+
 	// Adaptive threshold for short text.
 	// The adjustment is scaled by the gap between DupThreshold and a nominal ceiling (0.99),
 	// so high-baseline embedders (like Qwen3) get smaller adjustments.
@@ -441,6 +484,7 @@ func (d *Deduplicator) insertMemory(mem extractor.ExtractedMemory, vec []float32
 		Confidence:  mem.Confidence,
 		ContentHash: mem.ContentHash,
 		SourceConv:  mem.SourceConv,
+		Metadata:    mem.Metadata,
 		Vector:      vec,
 	}
 	return d.store.Insert(m)

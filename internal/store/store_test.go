@@ -104,3 +104,36 @@ func TestVectorSearch(t *testing.T) {
 		t.Errorf("Expected high similarity, got %f", results[0].Score)
 	}
 }
+
+func TestListExcludesSoftDeleted(t *testing.T) {
+	dbPath := "test_list_soft_delete.db"
+	t.Cleanup(func() { os.Remove(dbPath) })
+
+	store, err := New(Config{DBPath: dbPath, VectorDim: 3})
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.Insert(&Memory{
+		Text:       "soft deleted memory",
+		Category:   "memory",
+		Scope:      "global",
+		Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Failed to insert: %v", err)
+	}
+
+	if err := store.SoftDelete(id, 1234567890); err != nil {
+		t.Fatalf("Failed to soft delete: %v", err)
+	}
+
+	list, err := store.List("global", 10)
+	if err != nil {
+		t.Fatalf("Failed to list: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("expected soft-deleted memories to be excluded, got %d", len(list))
+	}
+}

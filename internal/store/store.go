@@ -511,12 +511,29 @@ func (s *sqliteStore) UpdateImportance(id string, importance float64) error {
 }
 
 // RecordSupersession records that newID supersedes oldID, and reduces oldID's importance.
+//
+// codex v4 round 1 high: 多 superseder 时只 ×0.3 一次（不每条边都 ×0.3）。
+// 原行为：fact a 被 b、c、d 同时 supersede → a.importance × 0.3³ = 0.027；
+// 但 restore_supersession_source 在 memory_adapter.py:497 注明只 /0.3 一次
+// （仅当无 active fusion 时才还原），导致 N 条边删完后 importance 永远漂离
+// 原值。v4 batch happy path 让一对多 supersession 成为常态，必须修。
+//
+// 新行为：仅当 INSERT 成功且 oldID 此前**没有任何**其它 supersession 边时
+// 才 ×0.3。撤销路径 /0.3 一次正好对称。
 func (s *sqliteStore) RecordSupersession(oldID, newID string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	// 先查 oldID 在插入新边之前的边数
+	var preCount int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM memory_supersessions WHERE old_id = ?`, oldID,
+	).Scan(&preCount); err != nil {
+		return err
+	}
 
 	res, err := tx.Exec(`
 		INSERT OR IGNORE INTO memory_supersessions (old_id, new_id, created_at)
@@ -525,12 +542,12 @@ func (s *sqliteStore) RecordSupersession(oldID, newID string) error {
 		return err
 	}
 
-	// Only reduce importance if a new row was actually inserted (idempotent)
 	rows, err := res.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if rows > 0 {
+	// 只有"INSERT 成功且这是 oldID 的第一条 supersession"时才降权
+	if rows > 0 && preCount == 0 {
 		_, err = tx.Exec(`UPDATE memories SET importance = importance * 0.3 WHERE id = ?`, oldID)
 		if err != nil {
 			return err

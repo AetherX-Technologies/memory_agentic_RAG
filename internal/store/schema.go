@@ -250,10 +250,13 @@ func migrateMemorySystem(db *sql.DB) error {
 		// （sweep 重抽时即便结论变了，也只是漏掉一次融合机会，不伤数据）。
 		// codex round 4 low：state 列加 CHECK 白名单，挡住外部/旧 bug 写入
 		// "error"/"unknown"/任意值导致后续 sweep 永久跳过该 pair。
+		// v3.3 round 1：新增 complementary_merged（同对象异属性合一条新 fact
+		// 已成功，原 source pair 不要再判）和 merge_failed（generator 返空/
+		// LLM 明确不可合并，避免无限重试烧 LLM）。
 		`CREATE TABLE IF NOT EXISTS memory_sweep_judgements (
 			old_id TEXT NOT NULL,
 			new_id TEXT NOT NULL,
-			state TEXT NOT NULL CHECK (state IN ('same','new_less_specific','unrelated')),
+			state TEXT NOT NULL CHECK (state IN ('same','new_less_specific','unrelated','complementary_merged','merge_failed')),
 			judged_at INTEGER NOT NULL,
 			PRIMARY KEY (old_id, new_id),
 			FOREIGN KEY (old_id) REFERENCES memories(id) ON DELETE CASCADE,
@@ -309,7 +312,7 @@ func upgradeSweepJudgementsCheck(db *sql.DB) error {
 	if _, err := tx.Exec(`CREATE TABLE memory_sweep_judgements_new (
 		old_id TEXT NOT NULL,
 		new_id TEXT NOT NULL,
-		state TEXT NOT NULL CHECK (state IN ('same','new_less_specific','unrelated')),
+		state TEXT NOT NULL CHECK (state IN ('same','new_less_specific','unrelated','complementary_merged','merge_failed')),
 		judged_at INTEGER NOT NULL,
 		PRIMARY KEY (old_id, new_id),
 		FOREIGN KEY (old_id) REFERENCES memories(id) ON DELETE CASCADE,
@@ -321,10 +324,13 @@ func upgradeSweepJudgementsCheck(db *sql.DB) error {
 	// memories 的 hard delete 没 cascade 删 judgement），新表带 FK 时
 	// INSERT 会因 orphan 触发 FK 失败导致整个迁移回滚阻断启动。这里
 	// 在 SELECT 阶段就 EXISTS 双侧校验把 orphan 过滤掉。
+	// v3.3 round 1：state 白名单同步扩到 5 个（complementary_merged/merge_failed
+	// 在新表的 CHECK 里允许，但旧表里不可能有这两个值，所以 IN 列表实际
+	// 只过滤老 4 态）。
 	if _, err := tx.Exec(`INSERT INTO memory_sweep_judgements_new
 		SELECT j.old_id, j.new_id, j.state, j.judged_at
 		FROM memory_sweep_judgements j
-		WHERE j.state IN ('same','new_less_specific','unrelated')
+		WHERE j.state IN ('same','new_less_specific','unrelated','complementary_merged','merge_failed')
 		  AND EXISTS (SELECT 1 FROM memories m WHERE m.id = j.old_id)
 		  AND EXISTS (SELECT 1 FROM memories m WHERE m.id = j.new_id)`); err != nil {
 		return err

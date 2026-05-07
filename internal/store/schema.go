@@ -317,9 +317,16 @@ func upgradeSweepJudgementsCheck(db *sql.DB) error {
 	)`); err != nil {
 		return err
 	}
+	// codex round 6 high: 旧库可能有 orphan judgement（FK 之前不可靠时
+	// memories 的 hard delete 没 cascade 删 judgement），新表带 FK 时
+	// INSERT 会因 orphan 触发 FK 失败导致整个迁移回滚阻断启动。这里
+	// 在 SELECT 阶段就 EXISTS 双侧校验把 orphan 过滤掉。
 	if _, err := tx.Exec(`INSERT INTO memory_sweep_judgements_new
-		SELECT old_id, new_id, state, judged_at FROM memory_sweep_judgements
-		WHERE state IN ('same','new_less_specific','unrelated')`); err != nil {
+		SELECT j.old_id, j.new_id, j.state, j.judged_at
+		FROM memory_sweep_judgements j
+		WHERE j.state IN ('same','new_less_specific','unrelated')
+		  AND EXISTS (SELECT 1 FROM memories m WHERE m.id = j.old_id)
+		  AND EXISTS (SELECT 1 FROM memories m WHERE m.id = j.new_id)`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DROP TABLE memory_sweep_judgements`); err != nil {
